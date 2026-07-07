@@ -27,7 +27,7 @@ import struct as _struct
 from collections import namedtuple
 
 try:
-    _MP_LIGHT_IMPORT = _mp.parent_process() is not None
+    _MP_LIGHT_IMPORT = _mp.current_process().name != 'MainProcess'
 except Exception:
     _MP_LIGHT_IMPORT = False
 
@@ -60,20 +60,24 @@ _dl1_mb_for_stab = 115.0
 
 
 
+_IS_FROZEN = getattr(sys, "frozen", False)
+
 def _get_base_dir():
     _override = os.environ.get("PYFAMATE_BASE_DIR", "")
     if _override:
         return _override
-    if getattr(sys, "frozen", False):
+    if _IS_FROZEN:
         return os.path.dirname(sys.executable)
     return os.path.dirname(os.path.abspath(__file__))
 
-_LOG_PATH   = os.path.join(_get_base_dir(), "diagnosis.txt")
+_BASE_DIR = _get_base_dir()
+
+_LOG_PATH   = os.path.join(_BASE_DIR, "diagnosis.txt")
 _SPSA_STATS_PATH_ENV = os.environ.get("SPSA_STATS_PATH", "")
-_STATS_PATH = _SPSA_STATS_PATH_ENV if _SPSA_STATS_PATH_ENV else os.path.join(_get_base_dir(), "stats.txt")
+_STATS_PATH = _SPSA_STATS_PATH_ENV if _SPSA_STATS_PATH_ENV else os.path.join(_BASE_DIR, "stats.txt")
 _SPSA_MODE  = bool(_SPSA_STATS_PATH_ENV)
-_SPSA_CONFIG_PATH     = os.path.join(_get_base_dir(), "spsa_config.txt")
-_SETUP_CONFIG_PATH    = os.path.join(_get_base_dir(), "setup_config.txt")
+_SPSA_CONFIG_PATH     = os.path.join(_BASE_DIR, "spsa_config.txt")
+_SETUP_CONFIG_PATH    = os.path.join(_BASE_DIR, "setup_config.txt")
 
 _CONFIG_TXT_IO_ENABLE = True
 
@@ -102,7 +106,7 @@ _SPSA_HW_PATTERNS = (
 
 def _spsa_hw_key_core(name: str) -> bool:
     return any(pat in name for pat in _SPSA_HW_PATTERNS)
-_ENGINE_OPTIONS_PATH  = os.path.join(_get_base_dir(), "engine_options.txt")
+_ENGINE_OPTIONS_PATH  = os.path.join(_BASE_DIR, "engine_options.txt")
 
 def _load_engine_options(path: str) -> dict:
     opts: dict = {}
@@ -328,7 +332,7 @@ _SR_RULE = 30
 _SR_WIDE_MARK = frozenset("▲△▼▽")
 _SR_JA_FILE = "１２３４５６７８９"
 _SR_JA_PIECE = {"P": "歩", "L": "香", "N": "桂", "S": "銀", "G": "金", "B": "角", "R": "飛", "K": "玉",
-                "+P": "と", "+L": "成香", "+N": "成桂", "+S": "成銀", "+B": "馬", "+R": "龍"}
+                "+P": "と", "+L": "杏", "+N": "圭", "+S": "全", "+B": "馬", "+R": "龍"}
 
 
 def _sr_cw(ch: str) -> int:
@@ -395,8 +399,7 @@ def _sr_hand_pieces(hand: dict) -> list:
 
 
 def _sr_eval_bar(winrate: float, n: int = 10) -> str:
-    frac = (winrate - 45.0) / 10.0
-    frac = 0.0 if frac < 0 else (1.0 if frac > 1 else frac)
+    frac = _clamp01((winrate - 45.0) / 10.0)
     filled = int(frac * n + 0.5)
     return "■" * filled + "□" * (n - filled)
 
@@ -577,13 +580,13 @@ def _sr_yose_meter(rec, b=None):
         _def = max(_def, 2)
 
     if isinstance(_sc, (int, float)):
-        if _sc >= 30000:
+        if _sc >= _MATE_CP:
             _atk = max(_atk, 4)
         elif _sc >= 5000:
             _atk = max(_atk, 2)
         elif _sc >= 2000:
             _atk = max(_atk, 1)
-        if _sc <= -30000:
+        if _sc <= -_MATE_CP:
             _def = max(_def, 4)
         elif _sc <= -5000:
             _def = max(_def, 2)
@@ -615,7 +618,7 @@ def _sr_yose_meter(rec, b=None):
 def _sr_segbar(n, cap=8, width=5):
     if not isinstance(n, (int, float)) or cap <= 0:
         return "□" * width
-    f = max(0, min(width, int(round((n / float(cap)) * width))))
+    f = _clamp(int(round((n / float(cap)) * width)), 0, width)
     return "■" * f + "□" * (width - f)
 
 
@@ -730,9 +733,9 @@ def _sr_render_pv_leaf(pos, pv):
     if _n == 0:
         return ""
     _hdr = "%d手先 %s" % (_n, _last)
-    _wr = _sv_leaf_winrate(_sb)
+    _win_rate = _sv_leaf_winrate(_sb)
     try:
-        return _sr_render_board(_sb, header=_hdr, winrate=_wr)
+        return _sr_render_board(_sb, header=_hdr, winrate=_win_rate)
     except Exception:
         return ""
 
@@ -786,7 +789,8 @@ def _sr_status_voices(rec, mode):
     if eg:
         veto = bool(rec.get("endgame_veto_applied"))
         dlmv = rec.get("endgame_veto_dl_move")
-        _dllbl = "DL₂" if "2" in (rec.get("endgame_veto_src") or "") else "DL₁"
+        _vsrc = rec.get("endgame_veto_src")
+        _dllbl = "DL₁" if _vsrc == "dl1" else "DL₃"
         status = "DLVeto" if veto else "終盤"
         final = dlmv if veto else rec.get("nnue_bestmove")
         voices.append(("NNUE", rec.get("nnue_bestmove"), _wr_nnue))
@@ -939,7 +943,6 @@ def _sr_pred_ease_lines(rec, b, policy, ja, multi_engine=True):
             for c in _cands if isinstance(c[2], (int, float))]
     if len(_wrs) >= 2:
         _wrs.sort(key=lambda t: -t[0])
-        _dec = _wrs[0][0] - _wrs[1][0]
         _shp = rec.get("sharpness") if isinstance(rec, dict) else None
         if _shp is not None and _shp >= 0.65:
             _ease_lbl = "難所"
@@ -973,7 +976,7 @@ def _sr_multipv_lines(policy, ja):
             continue
         _n = _circ[_i] if _i < len(_circ) else ("%2d." % (_i + 1))
         if isinstance(sc, (int, float)):
-            _scs = "詰" if sc >= 30000 else ("被詰" if sc <= -30000 else "%+d" % sc)
+            _scs = "詰" if sc >= _MATE_CP else ("被詰" if sc <= -_MATE_CP else "%+d" % sc)
         else:
             _scs = ""
         _rows.append(" " + _sr_pad(_n, 3) + " " + _sr_pad(ja(mv), 12) + _scs)
@@ -1032,7 +1035,7 @@ def _sr_render_endgame(rec, b, ja, clock, zenrei, dgp_ema, *, gp_ema=None, pv=No
         out.append(" " + _sr_pad("DL₃", 5) + _sr_pad(ja(_d3mv), 11)
                    + (("%3.0f%%" % (_d3wr * 100)) if isinstance(_d3wr, (int, float)) else ""))
     out.extend(_sr_pred_ease_lines(rec, b, policy, ja, multi_engine=bool(policy)))
-    _is_mate = bool(rec.get("mate_detected")) or (isinstance(sc, (int, float)) and abs(sc) >= 30000)
+    _is_mate = bool(rec.get("mate_detected")) or (isinstance(sc, (int, float)) and abs(sc) >= _MATE_CP)
     _pvja = _sr_pv_ja(b, pv)
     _lbl = ("被詰" if (_is_mate and isinstance(sc, (int, float)) and sc < 0) else ("詰" if _is_mate else "ツリー"))
     _annot = "" if _is_mate else _sr_read_annot(rec, b, final, zenrei)
@@ -1083,7 +1086,7 @@ def _sr_render_think(rec, pos, policy=None, pv=None, clock=None,
             return mv or "—"
         return _smk + (_sr_usi_to_ja(b, mv) if b is not None else mv)
 
-    def _wr(v):
+    def _fmt_wr(v):
         return ("%3.0f%%" % (v * 100)) if isinstance(v, (int, float)) else ""
 
     _mode = mode or ("ponderhit" if (isinstance(rec, dict) and rec.get("handler") == "ponderhit") else None)
@@ -1106,10 +1109,10 @@ def _sr_render_think(rec, pos, policy=None, pv=None, clock=None,
             _disp = mv
         else:
             _disp = _ja(mv)
-        out.append(" " + _sr_pad(lbl, 5) + _sr_pad(_disp, 11) + _wr(w))
+        out.append(" " + _sr_pad(lbl, 5) + _sr_pad(_disp, 11) + _fmt_wr(w))
     out.extend(_sr_pred_ease_lines(rec, b, policy, _ja, multi_engine=True))
     _sc = rec.get("nnue_score_cp")
-    _is_mate = bool(rec.get("mate_detected")) or (isinstance(_sc, (int, float)) and abs(_sc) >= 30000)
+    _is_mate = bool(rec.get("mate_detected")) or (isinstance(_sc, (int, float)) and abs(_sc) >= _MATE_CP)
     _pvmoves = _sr_pv_ja(b, pv)
     _lbl = ("被詰" if (_is_mate and isinstance(_sc, (int, float)) and _sc < 0) else ("詰" if _is_mate else "ツリー"))
     _annot = "" if _is_mate else _sr_read_annot(rec, b, final, zenrei)
@@ -1354,16 +1357,12 @@ def _pip_cmd(pycmd):
     return None
 
 
-def _ensure_pip(pycmd):
-    return _pip_cmd(pycmd) is not None
-
-
 def _pip_install(packages):
     if not packages:
         return True
     packages = list(packages)
     import shutil
-    if getattr(sys, "frozen", False):
+    if _IS_FROZEN:
         pycmd = _ensure_system_python()
         if not pycmd:
             return False
@@ -1385,7 +1384,7 @@ def _pip_install(packages):
         tail_preview = " | ".join(_tail[-5:]) if _tail else "(出力なし)"
         _flog(f"[pip-install] 失敗。末尾ログ: {tail_preview}")
         return False
-    if getattr(sys, "frozen", False):
+    if _IS_FROZEN:
         try:
             r = subprocess.run(
                 pycmd + ["-c", "import sys; print('\\n'.join(sys.path))"],
@@ -1430,9 +1429,6 @@ def _flip_ensure_installed() -> None:
         except Exception:
             pass
 
-    def _activate_in_current_process():
-        pass
-
     def _activate_user_machine_native():
         if os.name != "nt":
             return
@@ -1467,7 +1463,6 @@ def _flip_ensure_installed() -> None:
                           "既存フォントの再生成可否は判定できないため、"
                           "導入済みならそのまま既存フォントを使用します。")
                     if os.path.exists(_flip_installed_font_path()):
-                        _activate_in_current_process()
                         if os.name == "nt":
                             _note(_flip_setup_windows_terminal(engine_dir))
                             _activate_user_machine_native()
@@ -1483,7 +1478,6 @@ def _flip_ensure_installed() -> None:
             if os.path.exists(_flip_installed_font_path()):
                 if not _font_needs_rebuild(_flip_installed_font_path()):
                     _flog("[flip-auto] 導入済 (PUA OK): %s" % _flip_installed_font_path())
-                    _activate_in_current_process()
                     if os.name == "nt":
                         _note(_flip_setup_windows_terminal(engine_dir))
                         _activate_user_machine_native()
@@ -1498,7 +1492,6 @@ def _flip_ensure_installed() -> None:
             os.makedirs(os.path.dirname(out), exist_ok=True)
             _flip_build_font(out, mode="plain")
             _note(_flip_install_font(out))
-            _activate_in_current_process()
             if os.name == "nt":
                 _note(_flip_setup_windows_terminal(engine_dir))
                 _activate_user_machine_native()
@@ -1653,11 +1646,11 @@ class _LiveConsole:
         self._last_kw = kw
         if isinstance(self._dyn_cp, (int, float)) and self._dyn_cp_pos:
             try:
-                _wr = _cp_to_winrate(self._dyn_cp, _SR_WR_SLOPE)
+                _win_rate = _cp_to_winrate(self._dyn_cp, _SR_WR_SLOPE)
                 if getattr(_board_for_position(self._dyn_cp_pos), "side", "b") == "w":
-                    _wr = 1.0 - _wr
+                    _win_rate = 1.0 - _win_rate
                 kw = dict(kw)
-                kw["winrate"] = _wr * 100.0
+                kw["winrate"] = _win_rate * 100.0
             except Exception:
                 pass
         if "winrate" in kw and kw["winrate"] is not None:
@@ -2150,13 +2143,13 @@ class _Shogidb2Zenrei:
                 self._inflight.discard(key)
                 if _fetch_ok:
                     self._cache[key] = (count, ply)
-                    if count is not None:
-                        if (self._latest is None or ply is None
+                    if count is not None and ply is not None:
+                        if (self._latest is None
                                 or self._latest[1] is None
                                 or ply >= self._latest[1]):
                             self._latest = (count, ply)
                     if len(self._cache) > self._max_cache:
-                        for k in list(self._cache.keys())[: self._max_cache // 4]:
+                        for k in list(self._cache)[: self._max_cache // 4]:
                             self._cache.pop(k, None)
             if _fetch_ok and on_complete is not None:
                 try:
@@ -2271,8 +2264,8 @@ def _wdoor_consistency_check(game_id, local_kifu_moves, local_result,
             text = raw.decode("utf-8", errors="replace")
     except Exception as e:
         _flog(f"[WDOOR-CHECK] 取得失敗 (skip, 対局には無影響): url={url} err={e!r}")
-        _flog(f"[WDOOR-CHECK] ヒント: egress 許可リストに "
-              f"wdoor.c.u-tokyo.ac.jp を追加すると自動照合が有効になります。")
+        _flog("[WDOOR-CHECK] ヒント: egress 許可リストに "
+              "wdoor.c.u-tokyo.ac.jp を追加すると自動照合が有効になります。")
         return
 
     w_moves, w_end_sym, w_summary, w_end_time = _wdoor_parse_csa_moves(text)
@@ -2320,7 +2313,7 @@ def _wdoor_consistency_check(game_id, local_kifu_moves, local_result,
           f"reason={local_end_reason or '-'} / wdoor end_sym={w_end_sym} "
           f"summary={w_summary or '-'}")
     if len(w_moves) > len(l_moves):
-        _missing = [w_moves[i][0] for i in range(len(l_moves), len(w_moves))]
+        _missing = [m[0] for m in w_moves[len(l_moves):]]
         _flog(f"[WDOOR-CHECK] [警告] local kifu が末尾 {len(_missing)} 手を未記録: "
               f"{_missing}  — 終局直前のクラッシュ/送信前終局の可能性")
     elif len(l_moves) > len(w_moves):
@@ -2693,30 +2686,28 @@ def _assert_position_integrity(position_cmd, ctx_position, context):
 
 
 
-_DEFAULT_DL_1_PATH   = ""
-_DEFAULT_nnue_1_PATH = ""
-_DEFAULT_DL_2_PATH       = ""
-_DEFAULT_nnue_2_PATH = _DEFAULT_nnue_1_PATH
+if _IS_FROZEN:
+    _ENGINES_DIR = os.path.dirname(os.path.dirname(sys.executable))
+else:
+    _ENGINES_DIR = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+_DEFAULT_DL_1_PATH   = os.path.join(_ENGINES_DIR, "DL 1", "engine")
+_DEFAULT_nnue_1_PATH = os.path.join(_ENGINES_DIR, "nnue 1", "engine")
+_DEFAULT_DL_2_PATH       = os.path.join(_ENGINES_DIR, "DL 2", "engine")
+_DEFAULT_nnue_2_PATH = os.path.join(_ENGINES_DIR, "nnue 2", "engine")
 _POOL_LETTERS = "abcdefghijklmnopqrstuvwxyz"
 
 def _pool_letter(i: int) -> str:
     return _POOL_LETTERS[i] if 0 <= i < len(_POOL_LETTERS) else "?"
 
 def _pool_letter_index(ch: str) -> int:
-    ch = str(ch).strip().lower()
+    ch = _norm_str(ch)
     return _POOL_LETTERS.index(ch) if len(ch) == 1 and ch in _POOL_LETTERS else -1
 
-_DEFAULT_DL_POOL = {
-    "a": "",
-    "b": "",
-    "c": "",
-    "d": "",
-    "e": "",
-    "f": "",
-}
+_DEFAULT_DL_POOL = {k: os.path.join(_ENGINES_DIR, f"DL {i}", "engine")
+                    for i, k in enumerate("abcdef", 1)}
 _DEFAULT_NNUE_POOL = {
-    "a": "",
-    "b": "",
+    "a": os.path.join(_ENGINES_DIR, "nnue 1", "engine"),
+    "b": os.path.join(_ENGINES_DIR, "nnue 2", "engine"),
 }
 
 _DL_SLOT_EXCLUDED_INDICES = {
@@ -2729,6 +2720,44 @@ _DL_SLOT_EXCLUDED_INDICES = {
 def _dl_slot_allowed_indices(slot: str, all_indices) -> list:
     excl = _DL_SLOT_EXCLUDED_INDICES.get(slot, set())
     return [i for i in sorted(all_indices) if i not in excl]
+
+
+_MATE_SCORE_CP = 29000
+_MATE_CP = 30000
+_SCORE_CLAMP_CP = 3000
+_WINRATE_EPSILON = 1e-6
+
+_REGIME_CRUISE = "cruise"
+_REGIME_ALERT  = "alert"
+_REGIME_CRISIS = "crisis"
+
+_TRUST_ABSOLUTE = "absolute"
+_TRUST_ADVISORY = "advisory"
+_TRUST_SUSPECT  = "suspect"
+
+_PROXY_MODE_BOOST_ONLY = "boost_only"
+_PROXY_MODE_FUSE       = "fuse"
+_PROXY_MODE_REPLACE    = "replace"
+
+
+def _cnum(cfg, key, default, lo, hi, cast):
+    v = cast(cfg.get(key, default))
+    if lo is not None:
+        v = max(lo, v)
+    if hi is not None:
+        v = min(hi, v)
+    return v
+
+def _cfloat(cfg: dict, key: str, default: float, lo: float = None, hi: float = None) -> float:
+    return _cnum(cfg, key, default, lo, hi, float)
+
+def _cint(cfg: dict, key: str, default: int, lo: int = None, hi: int = None) -> int:
+    return _cnum(cfg, key, default, lo, hi, int)
+
+def _clamp(v, lo, hi):
+    return max(lo, min(hi, v))
+
+
 _CONFIG_DEFAULTS = {
 
     "DL_1_Path":                      _DEFAULT_DL_1_PATH,
@@ -2749,8 +2778,8 @@ _CONFIG_DEFAULTS = {
     "nnue_1_Engine_Index":            1,
     "nnue_2_Engine_Index":            0,
     "SPSA_Tune_Pool_Params":          False,
-    "mate_solver_Path":               "Zyfamate.exe",
-    "DL_3_Path":                      "",
+    "mate_solver_Path":               "Zyfamate",
+    "DL_3_Path":                      _DEFAULT_DL_POOL["c"],
     "nnue_1_Threads":                 "4",
     "nnue_1_Hash":                    "4096",
     "nnue_1_FV_Scale":                "40",
@@ -2812,8 +2841,8 @@ _CONFIG_DEFAULTS = {
     "Book_Hash":                      512,
     "Book_Threads":                   1,
     "Book_SlowMover":                 999,
-    "Book_Pool_0_Trust":             "",
-    "Book_Pool_1_Trust":             "",
+    "Book_Pool_0_Trust":             _TRUST_ABSOLUTE,
+    "Book_Pool_1_Trust":             _TRUST_ADVISORY,
     "Book_Pool_0_DB_InMemory":       "true",
     "Book_Pool_0_DB_SelectMode":     "head",
     "Book_Pool_0_DB_EvalDiff":       0,
@@ -2826,7 +2855,7 @@ _CONFIG_DEFAULTS = {
     "Book_Council_Bias_Suspect":      1.3,
     "Book2_Fire_On_Consec":           1,
     "Book2_Pool_Index":               1,
-    "Book2_Default_Trust":           "advisory",
+    "Book2_Default_Trust":           _TRUST_ADVISORY,
     "Book2_Consec":                   1,
     "nnue_1_OwnBook":                 False,
     "nnue_1_BookFile":                "no_book",
@@ -2860,15 +2889,18 @@ _CONFIG_DEFAULTS = {
     "DL_2_DNN_Batch_Size1":           "256",
     "DL_2_Stochastic_Ponder":         "true",
     "DL_2_Node_Ratio":                0.8508,
+    "DL_Dynamic_Nodes_Enable":        False,
+    "DL_Dynamic_Nodes_GPU_Thresh":    85,
+    "DL_Dynamic_Nodes_Floor_Ratio":   0.25,
+    "DL_2_Resource_Gate_Enable":      False,
+    "DL_2_Resource_Gate_GPU_Thresh":  90,
+    "DL_2_Resource_Gate_VRAM_Margin_MB": 1024,
     "GP_Handover_Threshold":          0.7956,
     "GP_Handover_Default":            1.0,
     "Handover_Reverse_Hysteresis":    0.12,
-    "Endgame_DL_Veto_Use_DL1":       True,
-    "Endgame_DL_Veto_Use_DL2":       False,
-    "Endgame_DL_Veto_Nodes":         400,
-    "Endgame_DL_Veto_Timeout_Ms":    400,
     "Endgame_DL_Veto_Min_Eff_S":     1.5983,
     "Endgame_DL_Veto_WR_Margin":     0.1924,
+    "Endgame_DL_Veto_DL1_Min_Eff_S": 40.0,
     "Endgame_DL_Veto_GP_Lo_Scale":   1.0,
     "Endgame_DL_Veto_GP_Hi_Scale":   0.4,
     "Endgame_FV_Scale":              0,
@@ -2933,6 +2965,7 @@ _CONFIG_DEFAULTS = {
     "GPU_Ponder_Nodes_Max":           200000,
     "DL_Ponder_Enable":               False,
     "Multi_Ponder_Enable":            True,
+    "SMP_Alt_Min_Gap":               0.0,
     "DL_Ponder_Mode":                 "auto",
     "DLP_Gain_Min":                   2.0,
     "DLP_Min_Samples":                3,
@@ -3089,12 +3122,11 @@ _CONFIG_DEFAULTS = {
     "SlowMover_Per_Sec":               7.2291,
     "SlowMover_Min":                   90   ,
     "SlowMover_Max":                   195   ,
-    "DL3_Council_Weight":              0.2851,
     "Council_Corr_Dampen":            0.0,
     "Council_Corr_WR_Scale":          0.25,
     "DL3_Proxy_Enable":                True,
     "DL3_Proxy_Scope":                 "always",
-    "DL3_Proxy_Mode":                  "boost_only",
+    "DL3_Proxy_Mode":                  _PROXY_MODE_BOOST_ONLY,
     "DL3_Proxy_Fuse_Alpha":            0.3718,
     "DL3_Proxy_Weight_Min":            0.5797,
     "DL3_Proxy_Weight_Max":            1.7298,
@@ -3178,7 +3210,7 @@ def _cfgvis_pool_keys(defaults):
 def _cfgvis_book_keys(defaults):
     return tuple(sorted(
         k for k in defaults
-        if k == "Book_Path" or k.startswith(("Book_Pool_", "Book2_Pool_"))))
+        if k == "Book_Path" or k.startswith("Book_Pool_")))
 
 
 def _cfgvis_slot_keys(defaults):
@@ -3330,15 +3362,15 @@ def _normalize_auto_managed_config(cfg, user_cfg_keys):
     cfg = dict(cfg)
     user_cfg_keys = dict(user_cfg_keys)
 
-    aggr = max(0.0, min(_TA_CEIL, float(cfg.get("Time_Aggression", _CONFIG_DEFAULTS["Time_Aggression"]))))
+    aggr = _cfloat(cfg, "Time_Aggression", _CONFIG_DEFAULTS["Time_Aggression"], 0.0, _TA_CEIL)
     nnue1_hash = int(cfg.get("nnue_1_Hash", _CONFIG_DEFAULTS["nnue_1_Hash"]))
     dl1_hash = int(cfg.get("DL_1_Hash", _CONFIG_DEFAULTS["DL_1_Hash"]))
 
     auto_values = {
-        "nnue_1_SlowMover": str(round(_lerp(*_LERP_SLOWMOVER, max(0.0, min(_TA_CEIL, float(aggr)))))),
-        "nnue_2_SlowMover": str(round(_lerp(*_LERP_SLOWMOVER, max(0.0, min(_TA_CEIL, float(aggr)))))),
-        "DL_Time_Ratio": _lerp(*_LERP_DL_RATIO, max(0.0, min(_TA_CEIL, float(aggr)))),
-        "DL_Time_Max_ms": _lerp(*_LERP_DL_MAX_MS, max(0.0, min(_TA_CEIL, float(aggr)))),
+        "nnue_1_SlowMover": str(round(_lerp(*_LERP_SLOWMOVER, _clamp(float(aggr), 0.0, _TA_CEIL)))),
+        "nnue_2_SlowMover": str(round(_lerp(*_LERP_SLOWMOVER, _clamp(float(aggr), 0.0, _TA_CEIL)))),
+        "DL_Time_Ratio": _lerp(*_LERP_DL_RATIO, _clamp(float(aggr), 0.0, _TA_CEIL)),
+        "DL_Time_Max_ms": _lerp(*_LERP_DL_MAX_MS, _clamp(float(aggr), 0.0, _TA_CEIL)),
         "DL_2_Time_Margin_Min_ms": 5000.0 * aggr,
         "DL_3_Rescue_Eff_S_Min": 2.5 * aggr,
         "DL_3_Empty_Eff_S_Min": 2.5 * aggr,
@@ -3435,7 +3467,7 @@ def _load_config():
             _flog(f"setup_config.txt load error: {e}")
 
     user_cfg_keys = {}
-    user_path = os.path.join(_get_base_dir(), "config.txt")
+    user_path = os.path.join(_BASE_DIR, "config.txt")
     if not _config_txt_io_enabled():
         _flog("[CFG-IO] config.txt の生成/読み込みを停止中 "
               "(_CONFIG_TXT_IO_ENABLE=False) — defaults + spsa_config + "
@@ -3510,27 +3542,41 @@ def _early_excepthook(exc_type, exc_value, exc_tb):
 
 sys.excepthook = _early_excepthook
 
-_cfg, _user_cfg_keys = _load_config()
+if _MP_LIGHT_IMPORT:
+    _cfg = dict(_CONFIG_DEFAULTS)
+    _user_cfg_keys = {}
+else:
+    _cfg, _user_cfg_keys = _load_config()
 
-for _bk, _bv in list(_cfg.items()):
+for _bk, _bv in (list(_cfg.items()) if not _MP_LIGHT_IMPORT else []):
     if not (isinstance(_bk, str) and _bk.endswith("_Path")):
         continue
     _bv_s = str(_bv)
-    if os.path.exists(_bv_s):
+    _bv_ext = os.path.splitext(_bv_s)[1].lower()
+    if _bv_ext in (".bat", ".cmd"):
+        if os.path.exists(_bv_s):
+            continue
+        _bv_alts = [os.path.splitext(_bv_s)[0] + ".exe"]
+    elif _bv_ext == ".exe":
+        if os.path.exists(_bv_s):
+            continue
+        _bv_alts = [os.path.splitext(_bv_s)[0] + ".bat"]
+    elif _bv_ext == "":
+        if os.name == "nt":
+            _bv_alts = [_bv_s + ".exe", _bv_s + ".bat"]
+        elif os.path.exists(_bv_s):
+            continue
+        else:
+            _bv_alts = [_bv_s + ".exe", _bv_s + ".bat"]
+    else:
         continue
-    if os.path.splitext(_bv_s)[1].lower() not in (".bat", ".cmd"):
-        continue
-    _bv_exe = os.path.splitext(_bv_s)[0] + ".exe"
-    if os.path.exists(_bv_exe):
-        _flog(f"[NNUE2-BAT2EXE] {_bk} の .bat/.cmd が不在 ({_bv_s}) → "
-              f"同名 .exe へ自動フォールバック: {_bv_exe}")
-        print(f"[WARN] {_bk}: {os.path.basename(_bv_s)} が見つからないため "
-              f"{os.path.basename(_bv_exe)} を起動します",
-              file=sys.stderr, flush=True)
-        _cfg[_bk] = _bv_exe
+    for _bv_alt in _bv_alts:
+        if os.path.exists(_bv_alt):
+            _cfg[_bk] = _bv_alt
+            break
 
-for _lpk in list(_cfg.keys()):
-    if not (_lpk.endswith("_Path") or _lpk.endswith("Dir")):
+for _lpk in (list(_cfg) if not _MP_LIGHT_IMPORT else []):
+    if not (_lpk.endswith(("_Path", "Dir"))):
         continue
     _lpv = str(_cfg.get(_lpk) or "").strip()
     if not _lpv:
@@ -3574,7 +3620,47 @@ def _dict_bool(cfg: dict, key: str, default: bool = False) -> bool:
     v = cfg.get(key, default)
     if isinstance(v, bool):
         return v
-    return str(v).strip().lower() in ("true", "1", "yes")
+    return _norm_str(v) in ("true", "1", "yes")
+
+
+def _bstr(val) -> str:
+    return "true" if val else "false"
+
+
+def _eng_alive(eng) -> bool:
+    return eng is not None and getattr(eng, "_alive", False)
+
+
+def _clamp01(v: float) -> float:
+    return max(0.0, min(1.0, v))
+
+
+def _mate_sign_score(ply) -> int:
+    return _MATE_CP if ply > 0 else -_MATE_CP
+
+
+def _norm_str(v) -> str:
+    return str(v).strip().lower()
+
+
+def _is_scored_info(line: str) -> bool:
+    return line.startswith("info") and "depth" in line and "score" in line
+
+
+def _get_proc(obj):
+    return getattr(obj, "_proc", None) or getattr(obj, "proc", None)
+
+
+def _cache_trim(cache, limit=8192):
+    if len(cache) > limit:
+        cache.popitem(last=False)
+
+
+def _unpack_bestmove(ni):
+    if ni:
+        return ni.get("bestmove", ""), ni.get("ponder")
+    return "", None
+
 
 
 _DEBUG_ASSERTIONS = _cfg_bool("Debug_Assertions", False)
@@ -3584,11 +3670,11 @@ _LIVE_PV_LEAF_MODEL_WR = _cfg_bool("Live_PV_Leaf_Model_WR", True)
 _SVINFER_USE_SLIM = _cfg_bool("SvInfer_Use_Slim", True)
 _ENDGAME_VETO_MODEL_WR = _cfg_bool("Endgame_Veto_Model_WR", True)
 try:
-    _LIVE_VOICE_LINGER_S = max(0.0, float(_cfg.get("Live_Voice_Linger_S", 1.0)))
+    _LIVE_VOICE_LINGER_S = _cfloat(_cfg, "Live_Voice_Linger_S", 1.0, lo=0.0)
 except Exception:
     _LIVE_VOICE_LINGER_S = 1.0
 try:
-    _LIVE_PV_LEAF_MIN_S = max(0.0, float(_cfg.get("Live_PV_Leaf_Min_S", _LIVE_PV_LEAF_MIN_S)))
+    _LIVE_PV_LEAF_MIN_S = _cfloat(_cfg, "Live_PV_Leaf_Min_S", _LIVE_PV_LEAF_MIN_S, lo=0.0)
 except Exception:
     pass
 
@@ -3654,64 +3740,65 @@ def _detect_book_pool_indices() -> list[int]:
             result.append(int(m.group(1)))
     return sorted(result)
 
-_pool_legacy_keys = sorted(
-    k for k in _cfg
-    if re.match(r"^(DL|nnue)_Pool_\d+_", k))
-if _pool_legacy_keys:
-    print("[WARN] 旧数値プールキーを検出 — プールキーは英字です "
-          "(0=a,1=b,... 例: DL_Pool_4_Path → DL_Pool_e_Path / "
-          "DL_Pool_4_C_init → DL_Pool_e_C_init): %s"
-          % _pool_legacy_keys, file=sys.stderr, flush=True)
-    _flog("[POOL-ABC] legacy numeric pool keys ignored: %s" % _pool_legacy_keys)
-
-DL_1_PATH    = _resolve_pool_path("DL_Pool_", None, "DL_1_Engine_Index", "DL_1_Path")
-nnue_1_PATH  = _resolve_pool_path("nnue_Pool_", None, "nnue_1_Engine_Index", "nnue_1_Path")
-DL_2_PATH    = _resolve_pool_path("DL_Pool_", None, "DL_2_Engine_Index", "DL_2_Path")
-_nnue_2_idx_raw = _cfg.get("nnue_2_Engine_Index", 0)
-try:
-    _nnue_2_idx = int(_nnue_2_idx_raw)
-except (TypeError, ValueError):
-    _nnue_2_idx = None
-_nnue_1_idx_raw = _cfg.get("nnue_1_Engine_Index", 1)
-try:
-    _nnue_1_idx = int(_nnue_1_idx_raw)
-except (TypeError, ValueError) as _e:
-    print("[WARN] nnue_1_Engine_Index parse fail (%r): fallback to 1"
-          % (_nnue_1_idx_raw,), file=sys.stderr, flush=True)
-    _flog("[NNUE-SEP] nnue_1_Engine_Index parse fail: %r — fallback to 1" % _e)
-    _nnue_1_idx = 1
-if _nnue_2_idx is None:
-    print("[WARN] nnue_2_Engine_Index parse fail (%r): fallback to 0"
-          % (_nnue_2_idx_raw,), file=sys.stderr, flush=True)
-    _flog("[NNUE-SEP] nnue_2_Engine_Index parse fail: %r — fallback to 0"
-          % (_nnue_2_idx_raw,))
-    _nnue_2_idx = 0
-if _nnue_2_idx == _nnue_1_idx:
-    _np_alts = [i for i in sorted(_detect_pool_indices("nnue_Pool_"))
-                if i != _nnue_1_idx]
-    if _np_alts:
-        _flog(f"[NNUE-SEP] nnue_2_Engine_Index={_nnue_2_idx} が nnue_1 と同一 "
-              f"→ {_np_alts[0]} へ振替 (別エンジン強制)")
-        _nnue_2_idx = _np_alts[0]
-    else:
-        print("[ERROR] nnue_2 == nnue_1 (idx=%d) かつ代替プール無し "
-              "— 別エンジン分離不能。config を確認すべし (nnue_Pool_*_Path)"
-              % _nnue_1_idx, file=sys.stderr, flush=True)
-        _flog("[NNUE-SEP] FATAL invariant: nnue_2 == nnue_1 idx=%d かつ alts 無し"
-              % _nnue_1_idx)
-_nnue_2_pool_key = (f"nnue_Pool_{_pool_letter(_nnue_2_idx)}_Path"
-                    if _nnue_2_idx is not None else "")
-if _nnue_2_idx is not None and 0 <= _nnue_2_idx < 2 and _nnue_2_pool_key in _cfg:
-    nnue_2_PATH = str(_cfg[_nnue_2_pool_key])
-elif str(_cfg["nnue_2_Path"]) == _DEFAULT_nnue_2_PATH:
-    nnue_2_PATH = nnue_1_PATH
+if not _MP_LIGHT_IMPORT:
+    DL_1_PATH    = _resolve_pool_path("DL_Pool_", None, "DL_1_Engine_Index", "DL_1_Path")
+    nnue_1_PATH  = _resolve_pool_path("nnue_Pool_", None, "nnue_1_Engine_Index", "nnue_1_Path")
+    DL_2_PATH    = _resolve_pool_path("DL_Pool_", None, "DL_2_Engine_Index", "DL_2_Path")
 else:
-    nnue_2_PATH = str(_cfg["nnue_2_Path"])
+    DL_1_PATH = nnue_1_PATH = DL_2_PATH = ""
+if not _MP_LIGHT_IMPORT:
+    _nnue_2_idx_raw = _cfg.get("nnue_2_Engine_Index", 0)
+    try:
+        _nnue_2_idx = int(_nnue_2_idx_raw)
+    except (TypeError, ValueError):
+        _nnue_2_idx = None
+    _nnue_1_idx_raw = _cfg.get("nnue_1_Engine_Index", 1)
+    try:
+        _nnue_1_idx = int(_nnue_1_idx_raw)
+    except (TypeError, ValueError) as _e:
+        print("[WARN] nnue_1_Engine_Index parse fail (%r): fallback to 1"
+              % (_nnue_1_idx_raw,), file=sys.stderr, flush=True)
+        _flog("[NNUE-SEP] nnue_1_Engine_Index parse fail: %r — fallback to 1" % _e)
+        _nnue_1_idx = 1
+    if _nnue_2_idx is None:
+        print("[WARN] nnue_2_Engine_Index parse fail (%r): fallback to 0"
+              % (_nnue_2_idx_raw,), file=sys.stderr, flush=True)
+        _flog("[NNUE-SEP] nnue_2_Engine_Index parse fail: %r — fallback to 0"
+              % (_nnue_2_idx_raw,))
+        _nnue_2_idx = 0
+    if _nnue_2_idx == _nnue_1_idx:
+        _np_alts = [i for i in sorted(_detect_pool_indices("nnue_Pool_"))
+                    if i != _nnue_1_idx]
+        if _np_alts:
+            _flog(f"[NNUE-SEP] nnue_2_Engine_Index={_nnue_2_idx} が nnue_1 と同一 "
+                  f"→ {_np_alts[0]} へ振替 (別エンジン強制)")
+            _nnue_2_idx = _np_alts[0]
+        else:
+            print("[ERROR] nnue_2 == nnue_1 (idx=%d) かつ代替プール無し "
+                  "— 別エンジン分離不能。config を確認すべし (nnue_Pool_*_Path)"
+                  % _nnue_1_idx, file=sys.stderr, flush=True)
+            _flog("[NNUE-SEP] FATAL invariant: nnue_2 == nnue_1 idx=%d かつ alts 無し"
+                  % _nnue_1_idx)
+    _nnue_2_pool_key = (f"nnue_Pool_{_pool_letter(_nnue_2_idx)}_Path"
+                        if _nnue_2_idx is not None else "")
+    if _nnue_2_idx is not None and 0 <= _nnue_2_idx < 2 and _nnue_2_pool_key in _cfg:
+        nnue_2_PATH = str(_cfg[_nnue_2_pool_key])
+    elif str(_cfg["nnue_2_Path"]) == _DEFAULT_nnue_2_PATH:
+        nnue_2_PATH = nnue_1_PATH
+    else:
+        nnue_2_PATH = str(_cfg["nnue_2_Path"])
+else:
+    nnue_2_PATH = ""
+    _nnue_1_idx = 1
+    _nnue_2_idx = 0
 
 _params = {
     "POLICY_MOVES": int(_cfg.get("POLICY_MOVES", 9)),
     "POLICY_NODES": int(_cfg.get("POLICY_NODES", 2043)),
 }
+
+_RESOURCE_THREADS_SPARE_MIN = int(_cfg.get("Resource_Threads_Spare_Min", 2))
+_RESOURCE_RAM_SAFETY_MARGIN_MB = int(_cfg.get("Resource_RAM_Safety_Margin_MB", 4096))
 
 _PONDER_NEVER = {
     "USI_Ponder":        "false",
@@ -3756,7 +3843,7 @@ class _DlponderSaveSkip(Exception):
     pass
 
 
-_DLPONDER_STATE_PATH = os.path.join(_get_base_dir(), "dlp_state.txt")
+_DLPONDER_STATE_PATH = os.path.join(_BASE_DIR, "dlp_state.txt")
 _DLPONDER_STATE = {"nps_ema": None, "opponent_s_ema": None, "samples": 0,
               "mode": "ponder", "bm_ts": None,
               "dlp_dispatched": 0, "dlp_hits": 0, "dlp_misses": 0,
@@ -3772,7 +3859,27 @@ _DLPONDER_STATE = {"nps_ema": None, "opponent_s_ema": None, "samples": 0,
               "csm_sharp_nnue_score_none": 0,
               "csm_voices_n2": 0, "csm_voices_n1": 0,
               "regime_cruise_count": 0, "regime_alert_count": 0,
-              "regime_crisis_count": 0, "regime_collapse_count": 0}
+              "regime_crisis_count": 0, "regime_collapse_count": 0,
+              "dlp_drain_incomplete": 0, "dlp_rejoin": 0,
+              "dlp_gate_skips": 0, "dl2_alt_residue": 0}
+
+_DLP_DIFF_KEYS = (
+    "dlp_dispatched", "dlp_hits", "dlp_misses",
+    "mp_alt_dispatched", "mp_alt_hits",
+    "mpon_dispatched", "mpon_mate", "mpon_nomate_proof", "mpon_hits", "mpon_misses",
+    "dlp_drain_incomplete", "dlp_rejoin", "dlp_gate_skips", "dl2_alt_residue",
+)
+_DLP_GAME_SNAPSHOT = {}
+
+
+def _dlp_snapshot_for_diff():
+    global _DLP_GAME_SNAPSHOT
+    _DLP_GAME_SNAPSHOT = {k: int(_DLPONDER_STATE.get(k, 0)) for k in _DLP_DIFF_KEYS}
+
+
+def _dlp_game_diff():
+    return {k: int(_DLPONDER_STATE.get(k, 0)) - _DLP_GAME_SNAPSHOT.get(k, 0)
+            for k in _DLP_DIFF_KEYS}
 
 
 def _dlponder_load_state(path=None):
@@ -3823,11 +3930,11 @@ def _prereq_setup_done() -> bool:
 
 
 def _args_has_skip(args) -> bool:
-    return any(str(a).strip().lower() == "skip" for a in (args or []))
+    return any(_norm_str(a) == "skip" for a in (args or []))
 
 
 def _strip_skip(args):
-    return [a for a in (args or []) if str(a).strip().lower() != "skip"]
+    return [a for a in (args or []) if _norm_str(a) != "skip"]
 
 
 def _ensure_prereqs(command: str, args) -> bool:
@@ -3888,35 +3995,39 @@ def _ensure_prereqs(command: str, args) -> bool:
     return True
 
 
-_dlponder_mode_cfg = str(_cfg.get("DL_Ponder_Mode", "auto")).strip().lower()
-_DLPONDER_VALID_MODES = ("auto", "ponder", "prefetch")
-if _dlponder_mode_cfg not in _DLPONDER_VALID_MODES:
-    print(f"info string [WARN] DL_Ponder_Mode={_dlponder_mode_cfg!r} は無効です "
-          f"(候補: {_DLPONDER_VALID_MODES}) — 'ponder' で続行します",
-          flush=True)
-    _flog(f"[DLP] DL_Ponder_Mode={_dlponder_mode_cfg!r} unknown — fallback to 'ponder'")
+if _MP_LIGHT_IMPORT:
+    _dl_ponder_enable = True
     _dlponder_mode_cfg = "ponder"
-if "DL_Ponder_Enable" in _user_cfg_keys:
-    _dl_ponder_enable = str(_cfg.get("DL_Ponder_Enable", "false")).strip().lower() == "true"
-    _flog(f"[DLP] DL_Ponder_Enable={_dl_ponder_enable} (明示 user 設定 — auto 判定は不使用)")
-elif _dlponder_mode_cfg in ("ponder", "prefetch"):
-    _dl_ponder_enable = (_dlponder_mode_cfg == "ponder")
-    _flog(f"[DLP] mode={_dlponder_mode_cfg} (強制指定)")
 else:
-    _dlponder_load_state()
-    _dlponder_gain = _dlponder_gain_core(_DLPONDER_STATE["nps_ema"], _DLPONDER_STATE["opponent_s_ema"],
-                               int(_cfg.get("POLICY_NODES", 2043)))
-    _dlponder_decision = _dlponder_decide_core(
-        _dlponder_gain, float(_cfg.get("DLP_Gain_Min", 2.0)),
-        int(_DLPONDER_STATE.get("samples", 0)), int(_cfg.get("DLP_Min_Samples", 3)),
-        prev_mode=str(_DLPONDER_STATE.get("mode", "prefetch")))
-    _dl_ponder_enable = (_dlponder_decision == "ponder")
-    _DLPONDER_STATE["mode"] = _dlponder_decision
-    _flog(f"[DLP] mode=auto → {_dlponder_decision} "
-          f"(gain={None if _dlponder_gain is None else round(_dlponder_gain, 2)} "
-          f"nps_ema={_DLPONDER_STATE['nps_ema'] and round(_DLPONDER_STATE['nps_ema'])} "
-          f"opponent_s_ema={_DLPONDER_STATE['opponent_s_ema'] and round(_DLPONDER_STATE['opponent_s_ema'], 1)} "
-          f"samples={_DLPONDER_STATE['samples']} gain_min={_cfg.get('DLP_Gain_Min', 4.0)})")
+    _dlponder_mode_cfg = _norm_str(_cfg.get("DL_Ponder_Mode", "auto"))
+    _DLPONDER_VALID_MODES = ("auto", "ponder", "prefetch")
+    if _dlponder_mode_cfg not in _DLPONDER_VALID_MODES:
+        print(f"info string [WARN] DL_Ponder_Mode={_dlponder_mode_cfg!r} は無効です "
+              f"(候補: {_DLPONDER_VALID_MODES}) — 'ponder' で続行します",
+              flush=True)
+        _flog(f"[DLP] DL_Ponder_Mode={_dlponder_mode_cfg!r} unknown — fallback to 'ponder'")
+        _dlponder_mode_cfg = "ponder"
+    if "DL_Ponder_Enable" in _user_cfg_keys:
+        _dl_ponder_enable = _norm_str(_cfg.get("DL_Ponder_Enable", "false")) == "true"
+        _flog(f"[DLP] DL_Ponder_Enable={_dl_ponder_enable} (明示 user 設定 — auto 判定は不使用)")
+    elif _dlponder_mode_cfg in ("ponder", "prefetch"):
+        _dl_ponder_enable = (_dlponder_mode_cfg == "ponder")
+        _flog(f"[DLP] mode={_dlponder_mode_cfg} (強制指定)")
+    else:
+        _dlponder_load_state()
+        _dlponder_gain = _dlponder_gain_core(_DLPONDER_STATE["nps_ema"], _DLPONDER_STATE["opponent_s_ema"],
+                                   int(_cfg.get("POLICY_NODES", 2043)))
+        _dlponder_decision = _dlponder_decide_core(
+            _dlponder_gain, float(_cfg.get("DLP_Gain_Min", 2.0)),
+            int(_DLPONDER_STATE.get("samples", 0)), int(_cfg.get("DLP_Min_Samples", 3)),
+            prev_mode=str(_DLPONDER_STATE.get("mode", "prefetch")))
+        _dl_ponder_enable = (_dlponder_decision == "ponder")
+        _DLPONDER_STATE["mode"] = _dlponder_decision
+        _flog(f"[DLP] mode=auto → {_dlponder_decision} "
+              f"(gain={None if _dlponder_gain is None else round(_dlponder_gain, 2)} "
+              f"nps_ema={_DLPONDER_STATE['nps_ema'] and round(_DLPONDER_STATE['nps_ema'])} "
+              f"opponent_s_ema={_DLPONDER_STATE['opponent_s_ema'] and round(_DLPONDER_STATE['opponent_s_ema'], 1)} "
+              f"samples={_DLPONDER_STATE['samples']} gain_min={_cfg.get('DLP_Gain_Min', 4.0)})")
 _DL1_PONDER_OPTS = _PONDER_DL_ACTIVE if _dl_ponder_enable else _PONDER_NEVER
 _DL2_PONDER_OPTS = _PONDER_DL_ACTIVE if _dl_ponder_enable else _PONDER_NEVER
 _DL3_PONDER_OPTS = _PONDER_DL_ACTIVE if _dl_ponder_enable else _PONDER_NEVER
@@ -3926,7 +4037,7 @@ _multi_ponder_enable = (_cfg_bool("Multi_Ponder_Enable", True)
 if _dl_ponder_enable:
     _flog(f"[SMP] Multi_Ponder={_multi_ponder_enable} "
           f"(DL_Ponder 実効=True に紐づけ / DL_2 SP 設定値="
-          f"{str(_cfg.get('DL_2_Stochastic_Ponder', 'true')).strip().lower()})")
+          f"{_norm_str(_cfg.get('DL_2_Stochastic_Ponder', 'true'))})")
 
 
 def _sys_ram_info():
@@ -3961,16 +4072,23 @@ def _sys_ram_info():
 
 def _ram_pressure_ok(margin_mb=None):
     if margin_mb is None:
-        margin_mb = int(_cfg.get("Resource_RAM_Safety_Margin_MB", 4096))
+        margin_mb = _RESOURCE_RAM_SAFETY_MARGIN_MB
     _, avail = _sys_ram_info()
     if avail is None:
-        return True
+        return False
     return avail >= margin_mb
 
 
 def _kif_dirs():
     dirs = []
-    for d in (r"C:\kif", r"E:\kif"):
+    if os.name == "nt":
+        _candidates = [r"C:\kif", r"E:\kif"]
+    else:
+        _candidates = [
+            os.path.join(os.path.dirname(_ENGINES_DIR), "kif"),
+            os.path.expanduser("~/kif"),
+        ]
+    for d in _candidates:
         if os.path.isdir(d):
             dirs.append(d)
     return dirs
@@ -4056,7 +4174,7 @@ def _sys_gpu_count(timeout_s=2.0):
                     continue
                 _flog(f"[BUDGET][WARN] nvidia-smi GPU 数プローブ 2 回失敗 ({_gpe!r}) "
                       "— 1 GPU 扱いで確定 (persistence mode `nvidia-smi -pm 1` 推奨)")
-    _GPU_COUNT[0] = max(1, min(16, n))
+    _GPU_COUNT[0] = _clamp(n, 1, 16)
     return _GPU_COUNT[0]
 
 
@@ -4075,18 +4193,18 @@ def _budget_ram_basis_core(total_mb, avail_mb, pct_cap, use_available,
                            margin_mb, pct_lo=0.10, pct_hi=1.0):
     if total_mb is None:
         return None
-    pct = max(pct_lo, min(pct_hi, float(pct_cap)))
+    pct = _clamp(float(pct_cap), pct_lo, pct_hi)
     cap = int(total_mb * pct)
     if not use_available or avail_mb is None:
         return max(0, int((total_mb - margin_mb) * pct))
-    return max(0, min(cap, int(avail_mb) - int(margin_mb)))
+    return _clamp(int(avail_mb) - int(margin_mb), 0, cap)
 
 
 def _budget_alloc_core(total_units, pct, reserved_units, shares,
                        floor_units=1, pct_lo=0.10, pct_hi=1.0):
     if total_units is None:
         return None
-    pct = max(pct_lo, min(pct_hi, float(pct)))
+    pct = _clamp(float(pct), pct_lo, pct_hi)
     budget = int(total_units * pct) - int(reserved_units)
     s = {k: max(0.0, float(v)) for k, v in shares.items()}
     tot_w = sum(s.values())
@@ -4104,6 +4222,41 @@ def _budget_alloc_core(total_units, pct, reserved_units, shares,
 
 
 
+def _wsl_total_mem_mb(nnue_path):
+    if sys.platform != "win32":
+        return None
+    try:
+        _ext = os.path.splitext(nnue_path)[1].lower()
+        if _ext not in (".bat", ".cmd"):
+            return None
+        with open(nnue_path, "r", encoding="utf-8", errors="replace") as _f:
+            if "wsl" not in _f.read().lower():
+                return None
+    except Exception:
+        return None
+    try:
+        _out = subprocess.check_output(
+            ["wsl", "--", "head", "-1", "/proc/meminfo"],
+            timeout=5, text=True,
+            stdin=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
+            creationflags=0x08000000)
+        for _l in _out.splitlines():
+            if _l.startswith("MemTotal:"):
+                return int(_l.split()[1]) // 1024
+    except Exception:
+        pass
+    try:
+        _phys, _ = _sys_ram_info()
+        if _phys:
+            _fb = _phys // 2
+            _flog(f"[BUDGET-WSL] WSL probe failed; "
+                  f"fallback={_fb}MB (physical/2)")
+            return _fb
+    except Exception:
+        pass
+    return None
+
+
 def _tuning_mode_core(spsa_mode, worker_flag, argv1):
     return (bool(spsa_mode) or bool(worker_flag)
             or argv1 in ("spsa", "setup", "grid", "sprt", "teacher", "makebook"))
@@ -4113,7 +4266,7 @@ _tuning_mode = _tuning_mode_core(
     _SPSA_MODE, "--spsa-worker" in sys.argv,
     sys.argv[1] if len(sys.argv) > 1 else "")
 
-_tuning_worker_count = max(1, int(_cfg.get("Tuning_Worker_Count", 2)))
+_tuning_worker_count = _cint(_cfg, "Tuning_Worker_Count", 2, lo=1)
 _tuning_is_solo = ((len(sys.argv) > 1 and sys.argv[1] == "makebook")
                     or os.environ.get("PYFAMATE_TUNING_SOLO", "") == "1")
 
@@ -4191,7 +4344,7 @@ def _safe_cpu_count() -> int:
     if _logical == 0:
         _logical = 2
     try:
-        _cap = str(_cfg.get("Threads_Physical_Cap", "false")).strip().lower() in ("true", "1")
+        _cap = _norm_str(_cfg.get("Threads_Physical_Cap", "false")) in ("true", "1")
     except Exception:
         _cap = False
     if _cap:
@@ -4211,12 +4364,12 @@ _resource_ram_pct       = float(_cfg.get("Resource_RAM_Budget_Pct", 1.0))
 _resource_thr_pct       = float(_cfg.get("Resource_Threads_Budget_Pct", 1.0))
 _budget_overrode_hash   = False
 
-if True:
+if not _MP_LIGHT_IMPORT:
     _rb_total_mb, _rb_avail_mb = _sys_ram_info()
     _rb_basis_mb = _budget_ram_basis_core(
         _rb_total_mb, _rb_avail_mb, _resource_ram_pct,
         _cfg_bool("Resource_RAM_Use_Available", True) and not _tuning_mode,
-        int(_cfg.get("Resource_RAM_Safety_Margin_MB", 4096)))
+        _RESOURCE_RAM_SAFETY_MARGIN_MB)
     _rb_cores    = _effective_cores()
     _rb_arb_reserve = (int(_cfg.get("ARB1_NNUE2_Hash", 1024))
                        if (_cfg_bool("ARB_Enable", True)
@@ -4265,6 +4418,28 @@ if True:
         _rb_basis_mb, 1.0, _rb_reserved,
         _hash_shares,
         floor_units=64, pct_lo=1.0, pct_hi=1.0)
+    if (_rb_hash and "nnue_1_Hash" in _rb_hash
+            and _tuning_mode and _tuning_worker_count > 1):
+        try:
+            _pool_mem = _wsl_total_mem_mb(nnue_1_PATH)
+            _pool_label = "WSL VM"
+            if _pool_mem is None and sys.platform != "win32":
+                _pool_mem, _ = _sys_ram_info()
+                _pool_label = "Physical"
+            if _pool_mem is not None:
+                _pool_per = max(64,
+                                (_pool_mem - 512)
+                                // _tuning_worker_count)
+                if _rb_hash["nnue_1_Hash"] > _pool_per:
+                    _tag = ("BUDGET-WSL" if _pool_label == "WSL VM"
+                            else "BUDGET-MEM")
+                    _flog(f"[{_tag}] nnue_1_Hash "
+                          f"{_rb_hash['nnue_1_Hash']}→{_pool_per}MB "
+                          f"({_pool_label}={_pool_mem}MB "
+                          f"workers={_tuning_worker_count})")
+                    _rb_hash["nnue_1_Hash"] = _pool_per
+        except Exception as _e:
+            _flog(f"[BUDGET-MEM] check failed (ignored): {_e}")
     _rb_thr = _budget_alloc_core(
         _rb_cores, _resource_thr_pct, 0,
         {"nnue_1_Threads":    float(_cfg.get("Resource_Threads_Share_NNUE1", 8.0)),
@@ -4278,7 +4453,7 @@ if True:
                            ("DL_2_UCT_Threads1", 3),
                            ("DL_3_UCT_Threads1", 2)):
             if _rb_thr and _dk in _rb_thr:
-                _pg_v = max(1, min(_dcap, int(_rb_thr[_dk]) // _ng_pergpu))
+                _pg_v = _clamp(int(_rb_thr[_dk]) // _ng_pergpu, 1, _dcap)
                 if _pg_v != _rb_thr[_dk]:
                     _flog(f"[BUDGET-PERGPU] {_dk}: share {_rb_thr[_dk]} → "
                           f"{_pg_v}/GPU (gpus={_ng_pergpu} cap={_dcap})")
@@ -4314,7 +4489,7 @@ if True:
         _rb_applied.append("dlp-cal-min(nnue_1_Hash=16,nnue_1_Threads=1,nnue_2_Hash=16)")
         _cfg["Score_Stability_Swing_Threshold_Cp"] = "99999"
     try:
-        _spare_min = int(_cfg.get("Resource_Threads_Spare_Min", 1))
+        _spare_min = _RESOURCE_THREADS_SPARE_MIN
         _ng_dl = max(1, _sys_gpu_count())
         _dl_total = int(_cfg.get("DL_1_UCT_Threads1", 1)) * _ng_dl
         if _cfg_bool("DL_2_Enable", True):
@@ -4396,11 +4571,11 @@ _book_dir       = str(_cfg["BookDir"]).strip()
 
 _book_path          = str(_cfg.get("Book_Path", "")).strip()
 
-if _book_dir and not os.path.isabs(_book_dir):
+if _book_dir and not os.path.isabs(_book_dir) and not _MP_LIGHT_IMPORT:
     _book_dir_candidates = []
     if _book_path:
         _book_dir_candidates.append(os.path.join(os.path.dirname(_book_path), _book_dir))
-    _book_dir_candidates.append(os.path.join(_get_base_dir(), _book_dir))
+    _book_dir_candidates.append(os.path.join(_BASE_DIR, _book_dir))
     _resolved = None
     for _cand in _book_dir_candidates:
         if os.path.isdir(_cand):
@@ -4413,14 +4588,14 @@ if _book_dir and not os.path.isabs(_book_dir):
         _flog(f"[bookloader] BookDir 相対 {_book_dir!r}: 候補 {_book_dir_candidates} "
               f"いずれも存在せず — 相対のまま子エンジンへ委譲 (cwd 基準で解決)")
 
-_book_pool_indices  = _detect_book_pool_indices()
+_book_pool_indices  = _detect_book_pool_indices() if not _MP_LIGHT_IMPORT else []
 
 def _book_no_child_check(_idx: int) -> bool:
     _n = (_cfg.get(f"Book_Pool_{_idx}_BookFile", "") or "").strip().lower()
     if _n.endswith(".sbk"):
         return True
-    if _n.endswith(".db") or _n.endswith(".ybb"):
-        _im = str(_cfg.get(f"Book_Pool_{_idx}_DB_InMemory", "false")).strip().lower()
+    if _n.endswith((".db", ".ybb")):
+        _im = _norm_str(_cfg.get(f"Book_Pool_{_idx}_DB_InMemory", "false"))
         return _im in ("true", "1", "yes", "on")
     return False
 
@@ -4440,7 +4615,7 @@ _book_enabled       = (bool(_book_pool_indices) and not _book_spsa_disabled
 if _book_spsa_disabled and (_book_path or _book_pool_all_sbk):
     _flog("[bookloader] 自己対局モード検出 — Book を無効化 (定跡なしで対局)。")
 
-_nnue_pool_indices = _detect_pool_indices("nnue_Pool_")
+_nnue_pool_indices = _detect_pool_indices("nnue_Pool_") if not _MP_LIGHT_IMPORT else []
 _NNUE_POOL_FV_SCALE = {
     i: int(_cfg.get(f"nnue_Pool_{_pool_letter(i)}_FV_Scale",
                     _CONFIG_DEFAULTS.get(f"nnue_Pool_{_pool_letter(i)}_FV_Scale", 40)))
@@ -4536,7 +4711,7 @@ def _build_nnue_opts(slot_prefix, cfg, fv_scale, extra_engine_opts,
         "FV_Scale":            fv_scale,
         "MinimumThinkingTime": str(cfg[f"{slot_prefix}_MinimumThinkingTime"]),
         "SlowMover":           str(cfg[f"{slot_prefix}_SlowMover"]),
-        "USI_Ponder":          "true" if ponder_active else "false",
+        "USI_Ponder":          _bstr(ponder_active),
         "Stochastic_Ponder":   sp_default,
         "ResignValue":         str(cfg.get(f"{slot_prefix}_ResignValue", resign_default)),
         "EnteringKingRule":    str(cfg.get(f"{slot_prefix}_EnteringKingRule",
@@ -4560,10 +4735,10 @@ if _nnue_1_own_book:
     _nnue_1_opts["BookFile"]        = str(_cfg.get("nnue_1_BookFile", "no_book")).strip()
     _nnue_1_opts["BookDir"]         = str(_cfg.get("nnue_1_BookDir", "book")).strip()
     _nnue_1_opts["BookEvalDiff"]    = str(_cfg.get("nnue_1_BookEvalDiff", 30))
-    _nnue_1_opts["BookOnTheFly"]    = "true" if _cfg_bool("nnue_1_BookOnTheFly", False) else "false"
-    _nnue_1_opts["NarrowBook"]      = "true" if _cfg_bool("nnue_1_NarrowBook", False) else "false"
+    _nnue_1_opts["BookOnTheFly"]    = _bstr(_cfg_bool("nnue_1_BookOnTheFly", False))
+    _nnue_1_opts["NarrowBook"]      = _bstr(_cfg_bool("nnue_1_NarrowBook", False))
     _nnue_1_opts["BookMoves"]       = str(_cfg.get("nnue_1_BookMoves", 16))
-    _nnue_1_opts["IgnoreBookPly"]   = "true" if _cfg_bool("nnue_1_IgnoreBookPly", False) else "false"
+    _nnue_1_opts["IgnoreBookPly"]   = _bstr(_cfg_bool("nnue_1_IgnoreBookPly", False))
     _flog(f"[NNUE1-BOOK] nnue_1 内蔵 book 有効: BookFile={_nnue_1_opts['BookFile']!r} "
           f"BookDir={_nnue_1_opts['BookDir']!r} OnTheFly={_nnue_1_opts['BookOnTheFly']} "
           f"(採用は常に absolute 直通)")
@@ -4590,14 +4765,14 @@ class _TimeDynGlobals:
         self.dl_3_rescue_eff_s_min = 0.0
         self.dl_3_empty_eff_s_min = 0.0
 
-_tdg = _TimeDynGlobals()
+_time_dyn = _TimeDynGlobals()
 
-_tdg.time_aggression = max(0.0, min(_TA_CEIL, float(_cfg["Time_Aggression"])))
-_time_aggression_base = _tdg.time_aggression
+_time_dyn.time_aggression = _clamp(float(_cfg["Time_Aggression"]), 0.0, _TA_CEIL)
+_time_aggression_base = _time_dyn.time_aggression
 
 def _resolve_ta(key: str, base: float) -> float:
     v = float(_cfg.get(key, -1.0))
-    return base if v < 0.0 else max(0.0, min(_TA_CEIL, v))
+    return base if v < 0.0 else _clamp(v, 0.0, _TA_CEIL)
 
 
 def _time_aggression_dyn_ratio(dyn, base, lo=0.25, hi=1.5):
@@ -4608,11 +4783,14 @@ def _time_aggression_dyn_ratio(dyn, base, lo=0.25, hi=1.5):
 _time_aggression_dl     = _resolve_ta("Time_Aggression_DL",     _time_aggression_base)
 _time_aggression_nnue   = _resolve_ta("Time_Aggression_NNUE",   _time_aggression_base)
 _time_aggression_rescue = _resolve_ta("Time_Aggression_Rescue", _time_aggression_base)
-_tdg.time_aggression_rescue_dyn = _time_aggression_rescue
-_tdg.time_aggression_dl_dyn   = _time_aggression_dl
-_tdg.time_aggression_nnue_dyn = _time_aggression_nnue
+_time_dyn.time_aggression_rescue_dyn = _time_aggression_rescue
+_time_dyn.time_aggression_dl_dyn   = _time_aggression_dl
+_time_dyn.time_aggression_nnue_dyn = _time_aggression_nnue
 
-_nnue_slowmover_auto_val = str(round(_lerp(*_LERP_SLOWMOVER, _tdg.time_aggression)))
+def _ta_rescue_ratio():
+    return _time_dyn.time_aggression_rescue_dyn / _time_aggression_base if _time_aggression_base > 1e-6 else None
+
+_nnue_slowmover_auto_val = str(round(_lerp(*_LERP_SLOWMOVER, _time_dyn.time_aggression)))
 _nnue_slowmover_user_set = (
     "nnue_1_SlowMover" in _user_cfg_keys
     and str(_user_cfg_keys["nnue_1_SlowMover"]) != _nnue_slowmover_auto_val
@@ -4621,7 +4799,7 @@ _nnue_slowmover_user_set = (
 
 _nnue_2_slowmover_user_set = (
     "nnue_2_SlowMover" in _user_cfg_keys
-    and str(_user_cfg_keys["nnue_2_SlowMover"]) != str(round(_lerp(*_LERP_SLOWMOVER, _tdg.time_aggression)))
+    and str(_user_cfg_keys["nnue_2_SlowMover"]) != str(round(_lerp(*_LERP_SLOWMOVER, _time_dyn.time_aggression)))
     and not _could_be_auto_lerp(float(_user_cfg_keys["nnue_2_SlowMover"]), *_LERP_SLOWMOVER)
 )
 
@@ -4630,7 +4808,7 @@ _early_ponder = False
 if "nnue_2_Threads" in _user_cfg_keys:
     _nnue_2_threads = str(_cfg["nnue_2_Threads"])
 else:
-    _endgame_spare = int(_cfg.get("Resource_Threads_Spare_Min", 1))
+    _endgame_spare = _RESOURCE_THREADS_SPARE_MIN
     _nnue_2_threads = str(max(
         int(_cfg["nnue_1_Threads"]),
         max(1, _effective_cores() - _endgame_spare)))
@@ -4698,7 +4876,8 @@ def _endgame_restore_opts(nnue_1_opts: dict, promoted: dict) -> dict:
 
 _mate_solver_path    = str(_cfg["mate_solver_Path"]).strip()
 _mate_solver_enable = (
-    str(_cfg["mate_solver_Enable"]).strip().lower() == "true"
+    not _MP_LIGHT_IMPORT
+    and _norm_str(_cfg["mate_solver_Enable"]) == "true"
     and bool(_mate_solver_path)
 )
 
@@ -4706,6 +4885,7 @@ def _probe_csa_mate_solver(path):
     try:
         _r = subprocess.run(
             [path], capture_output=True, timeout=5,
+            stdin=subprocess.DEVNULL,
             creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0),
         )
         _out = (_r.stdout or b"").decode("utf-8", errors="replace") + \
@@ -4727,9 +4907,9 @@ if _mate_solver_enable:
                 and os.path.isfile(_mate_solver_path)):
             _zf_stem = os.path.splitext(os.path.basename(_mate_solver_path))[0]
             for _zf_cand in (_mate_solver_path,
-                             os.path.join(_get_base_dir(), _mate_solver_path),
-                             os.path.join(_get_base_dir(), _zf_stem),
-                             os.path.join(_get_base_dir(), "csa")):
+                             os.path.join(_BASE_DIR, _mate_solver_path),
+                             os.path.join(_BASE_DIR, _zf_stem),
+                             os.path.join(_BASE_DIR, "csa")):
                 if os.path.isfile(_zf_cand):
                     if _zf_cand != _mate_solver_path:
                         _flog(f"[ZYFAMATE] mate_solver_Path resolved: "
@@ -4751,7 +4931,7 @@ if _mate_solver_enable:
     else:
         _flog(f"[MATE-SOLVER] USI engine: {_mate_solver_path}")
 
-_mate_solver_min_game_phase = max(0.0, float(_cfg.get("Mate_Solver_Min_GP", 0.75)))
+_mate_solver_min_game_phase = _cfloat(_cfg, "Mate_Solver_Min_GP", 0.75, lo=0.0)
 _mate_ponder_min_game_phase_raw = str(_cfg.get("Mate_Ponder_Min_GP", "")).strip()
 _mate_ponder_min_game_phase = (_mate_solver_min_game_phase if _mate_ponder_min_game_phase_raw == ""
                        else max(0.0, float(_mate_ponder_min_game_phase_raw)))
@@ -4819,17 +4999,18 @@ def _mate_solver_movetime_core(eff_s, cfg):
     if eff_s is None or eff_s <= 0.0:
         return _maxm
     _raw = eff_s * 1000.0 * max(0.0, cfg.mate_solver_movetime_ratio)
-    return int(max(_minm, min(_maxm, _raw)))
+    return int(_clamp(_raw, _minm, _maxm))
 
-_dl_3_path    = _resolve_pool_path("DL_Pool_", None, "DL_3_Engine_Index", "DL_3_Path").strip()
+_dl_3_path    = (_resolve_pool_path("DL_Pool_", None, "DL_3_Engine_Index", "DL_3_Path").strip()
+                 if not _MP_LIGHT_IMPORT else "")
 _dl_3_mcts_opts = _build_dl_mcts_opts(_dl_3_path, "DL_3") if _dl_3_path else {}
 _flog(f"[DL_MCTS] DL_3 mcts_opts resolved: {_dl_3_mcts_opts or '(none — using engine defaults)'}")
 _dl_3_enable  = (
-    str(_cfg["DL_3_Enable"]).strip().lower() in ("true", "1", "yes")
+    _norm_str(_cfg["DL_3_Enable"]) in ("true", "1", "yes")
     and bool(_dl_3_path)
 )
-_tdg.dl_3_rescue_eff_s_min     = float(_cfg["DL_3_Rescue_Eff_S_Min"])
-_tdg.dl_3_empty_eff_s_min      = float(_cfg["DL_3_Empty_Eff_S_Min"])
+_time_dyn.dl_3_rescue_eff_s_min     = float(_cfg["DL_3_Rescue_Eff_S_Min"])
+_time_dyn.dl_3_empty_eff_s_min      = float(_cfg["DL_3_Empty_Eff_S_Min"])
 _dl_3_nodes                = int(_cfg["DL_3_Nodes"])
 _dl_3_effective_nodes      = _dl_3_nodes if _dl_3_nodes > 0 else _params["POLICY_NODES"]
 
@@ -4890,24 +5071,24 @@ _dl_stab_game_phase_tighten = float(_cfg.get("DL_Stability_GP_Tighten", 9))
 
 
 _dl_time_ratio_auto = _lerp(*_LERP_DL_RATIO, _time_aggression_dl)
-_tdg.dl_time_ratio, _dl_time_ratio_user_set = _resolve_auto_managed(
+_time_dyn.dl_time_ratio, _dl_time_ratio_user_set = _resolve_auto_managed(
     "DL_Time_Ratio", _dl_time_ratio_auto,
     check_fn=lambda v: _could_be_auto_lerp(v, *_LERP_DL_RATIO))
 _dl_min_remaining_moves   = max(1,  int(_cfg["DL_Min_Remaining_Moves"]))
-_rem_moves_expected_game_ply = max(100, min(512, int(_cfg.get("Rem_Moves_Expected_Game_Ply", 260))))
+_rem_moves_expected_game_ply = _cint(_cfg, "Rem_Moves_Expected_Game_Ply", 260, lo=100, hi=512)
 _dl_time_min_ms      = float(_cfg["DL_Time_Min_ms"])
-_eff_s_fischer_cap_ratio = max(0.0, float(_cfg.get("Eff_S_Fischer_Cap_Ratio", 0.3893)))
-_dl_time_min_eff_s_cap_ratio = max(0.0, float(_cfg.get("DL_Time_Min_Eff_S_Cap_Ratio", 0.7)))
-_inc_spend_ratio = max(0.1, min(1.0, float(_cfg.get("Inc_Spend_Ratio", 0.8244))))
-_fischer_horizon_moves = max(0, int(_cfg.get("Fischer_Horizon_Moves", 28)))
+_eff_s_fischer_cap_ratio = _cfloat(_cfg, "Eff_S_Fischer_Cap_Ratio", 0.3893, lo=0.0)
+_dl_time_min_eff_s_cap_ratio = _cfloat(_cfg, "DL_Time_Min_Eff_S_Cap_Ratio", 0.7, lo=0.0)
+_inc_spend_ratio = _cfloat(_cfg, "Inc_Spend_Ratio", 0.8244, lo=0.1, hi=1.0)
+_fischer_horizon_moves = _cint(_cfg, "Fischer_Horizon_Moves", 28, lo=0)
 _dl_time_ratio_eff_s_coef = float(_cfg.get("DL_Time_Ratio_Eff_S_Coef", -0.0049))
 _dl_time_max_ms_auto = _lerp(*_LERP_DL_MAX_MS, _time_aggression_dl)
-_tdg.dl_time_max_ms, _dl_time_max_ms_user_set = _resolve_auto_managed(
+_time_dyn.dl_time_max_ms, _dl_time_max_ms_user_set = _resolve_auto_managed(
     "DL_Time_Max_ms", _dl_time_max_ms_auto, tol=1.0,
     check_fn=lambda v: _could_be_auto_lerp(v, *_LERP_DL_MAX_MS, tol=1.0))
-_tdg.dl_time_fallback_ms = float(_user_cfg_keys["DL_Time_Fallback_ms"]) \
+_time_dyn.dl_time_fallback_ms = float(_user_cfg_keys["DL_Time_Fallback_ms"]) \
     if "DL_Time_Fallback_ms" in _user_cfg_keys \
-    else _tdg.dl_time_max_ms * 1.1
+    else _time_dyn.dl_time_max_ms * 1.1
 
 
 if not _nnue_slowmover_user_set:
@@ -4948,17 +5129,17 @@ if _retired_found:
         f"{', '.join(sorted(_retired_found))}。config.txt から削除してください。"
     )
 def _dl_2_node_budget(time_aggression_ratio=1.0):
-    policy_nodes = _params.get("POLICY_NODES", 2000)
+    policy_nodes = _params["POLICY_NODES"]
     _DL2_NODES_FLOOR = 32
     return max(_DL2_NODES_FLOOR, round(policy_nodes * _dl_2_node_ratio * time_aggression_ratio))
-_tdg.dl_2_time_max_ms           = float(_user_cfg_keys["DL_2_Time_Max_ms"]) \
+_time_dyn.dl_2_time_max_ms           = float(_user_cfg_keys["DL_2_Time_Max_ms"]) \
     if "DL_2_Time_Max_ms" in _user_cfg_keys \
-    else _tdg.dl_time_max_ms
+    else _time_dyn.dl_time_max_ms
 _TA_AUTO_SPECS = [
     ("DL_2_Time_Margin_Min_ms",
      5000.0 * _time_aggression_nnue,
      lambda v: _could_be_auto_scale(v, 5000.0, tol=1.0),
-     1.0, "ms", "Time_Aggression", _tdg.time_aggression),
+     1.0, "ms", "Time_Aggression", _time_dyn.time_aggression),
     ("DL_3_Rescue_Eff_S_Min",
      2.5 * _time_aggression_rescue,
      lambda v: _could_be_auto_scale(v, 2.5, tol=0.05),
@@ -4969,18 +5150,18 @@ _TA_AUTO_SPECS = [
      0.001, "s", "Time_Aggression_Rescue", _time_aggression_rescue),
 ]
 _time_aggression_resolved = {}
-for _time_aggression_key, _time_aggression_auto, _time_aggression_check, _time_aggression_tol, _time_aggression_unit, _time_aggression_label, _time_aggression_val in _TA_AUTO_SPECS:
+for _ta_key, _ta_auto, _ta_check, _ta_tol, _ta_unit, _ta_label, _ta_val in _TA_AUTO_SPECS:
     _val, _uset = _resolve_and_log(
-        _time_aggression_key, _time_aggression_auto, check_fn=_time_aggression_check, tol=_time_aggression_tol,
-        unit=_time_aggression_unit, time_aggression_label=_time_aggression_label, time_aggression_val=_time_aggression_val)
-    _time_aggression_resolved[_time_aggression_key] = (_val, _uset)
+        _ta_key, _ta_auto, check_fn=_ta_check, tol=_ta_tol,
+        unit=_ta_unit, time_aggression_label=_ta_label, time_aggression_val=_ta_val)
+    _time_aggression_resolved[_ta_key] = (_val, _uset)
 
-_tdg.dl_2_margin_min_ms, _dl_2_margin_min_user_set = _time_aggression_resolved["DL_2_Time_Margin_Min_ms"]
-_tdg.dl_3_rescue_eff_s_min, _dl_3_rescue_user_set = _time_aggression_resolved["DL_3_Rescue_Eff_S_Min"]
-_tdg.dl_3_empty_eff_s_min, _dl_3_empty_user_set = _time_aggression_resolved["DL_3_Empty_Eff_S_Min"]
+_time_dyn.dl_2_margin_min_ms, _dl_2_margin_min_user_set = _time_aggression_resolved["DL_2_Time_Margin_Min_ms"]
+_time_dyn.dl_3_rescue_eff_s_min, _dl_3_rescue_user_set = _time_aggression_resolved["DL_3_Rescue_Eff_S_Min"]
+_time_dyn.dl_3_empty_eff_s_min, _dl_3_empty_user_set = _time_aggression_resolved["DL_3_Empty_Eff_S_Min"]
 
 
-_dl3_proxy_scope       = str(_cfg.get("DL3_Proxy_Scope", "always")).strip().lower()
+_dl3_proxy_scope       = _norm_str(_cfg.get("DL3_Proxy_Scope", "always"))
 if _dl3_proxy_scope not in ("always", "dl2_absent"):
     _dl3_proxy_scope = "always"
 
@@ -4988,21 +5169,21 @@ _game_phase_w_hand    = float(_cfg.get("GP_W_Hand",    0.125335))
 _game_phase_w_promo   = float(_cfg.get("GP_W_Promo",   0.0))
 _game_phase_w_camp     = float(_cfg.get("GP_W_Camp",   0.107800))
 _game_phase_w_king    = float(_cfg.get("GP_W_King",    0.097863))
-_game_phase_king_ref  = max(0.1, float(_cfg.get("GP_King_Ref", 1.532946)))
+_game_phase_king_ref  = _cfloat(_cfg, "GP_King_Ref", 1.532946, lo=0.1)
 _game_phase_nyugyoku_king_onset = float(_cfg.get("GP_Nyugyoku_King_Onset", 0.345101))
 _game_phase_nyugyoku_king_full  = float(_cfg.get("GP_Nyugyoku_King_Full",  0.839616))
 if _game_phase_nyugyoku_king_full <= _game_phase_nyugyoku_king_onset:
     _game_phase_nyugyoku_king_full = _game_phase_nyugyoku_king_onset + 1e-6
-_game_phase_hand_ref  = max(1.0, float(_cfg.get("GP_Hand_Ref",  9.278644)))
-_game_phase_promo_ref = max(1.0, float(_cfg.get("GP_Promo_Ref", 5.686510)))
-_game_phase_camp_ref   = max(1.0, float(_cfg.get("GP_Camp_Ref", 7.314302)))
-_game_phase_scale     = max(1e-6, float(_cfg.get("GP_Scale", 1.285300)))
+_game_phase_hand_ref  = _cfloat(_cfg, "GP_Hand_Ref", 9.278644, lo=1.0)
+_game_phase_promo_ref = _cfloat(_cfg, "GP_Promo_Ref", 5.686510, lo=1.0)
+_game_phase_camp_ref   = _cfloat(_cfg, "GP_Camp_Ref", 7.314302, lo=1.0)
+_game_phase_scale     = _cfloat(_cfg, "GP_Scale", 1.285300, lo=1e-6)
 _game_phase_w_ply     = float(_cfg.get("GP_W_Ply", 0.524339))
-_game_phase_ply_ref   = max(1.0, float(_cfg.get("GP_Ply_Ref", 139.157857)))
+_game_phase_ply_ref   = _cfloat(_cfg, "GP_Ply_Ref", 139.157857, lo=1.0)
 _game_phase_ply_enable = _cfg_bool("GP_Ply_Enable", True)
 _game_phase_w_exposure = float(_cfg.get("GP_W_Exposure", 0.0))
-_game_phase_exposure_ref = max(1.0, float(_cfg.get("GP_Exposure_Ref", 12.244777)))
-_game_phase_child_pull = max(0.0, float(_cfg.get("GP_Child_Pull", 0.0)))
+_game_phase_exposure_ref = _cfloat(_cfg, "GP_Exposure_Ref", 12.244777, lo=1.0)
+_game_phase_child_pull = _cfloat(_cfg, "GP_Child_Pull", 0.0, lo=0.0)
 
 _game_phase_legacy_keys = [k for k in ("GP_" + "W_Drop", "GP_" + "Drop_Ref",
                                "GP_" + "W_Inv", "GP_" + "Inv_Ref")
@@ -5024,7 +5205,7 @@ def _endgame_min_eff_s_sanitize(v, floor=_NNUE_ONLY_EFFS_FLOOR,
     v = float(v)
     if v <= 0.0:
         return 0.0
-    return min(cap, max(floor, v))
+    return _clamp(v, floor, cap)
 
 
 def _endgame_mode_core(active, cur_game_phase, handover_game_phase, hysteresis,
@@ -5035,14 +5216,14 @@ def _endgame_mode_core(active, cur_game_phase, handover_game_phase, hysteresis,
         hysteresis = hysteresis * (1.0 - (1.0 - hysteresis_shrink) * _eff_t)
 
     effs_known = (eff_s is not None) and (eff_s > 0.0)
-    effs_low = (min_eff_s > 0.0) and effs_known and (eff_s < min_eff_s)
+    eff_s_below_min = (min_eff_s > 0.0) and effs_known and (eff_s < min_eff_s)
     if not active:
         if cur_game_phase >= handover_game_phase:
             return "activate_game_phase"
-        if effs_low:
+        if eff_s_below_min:
             return "activate_eff_s"
         return "hold"
-    if effs_low:
+    if eff_s_below_min:
         return "hold"
     if min_eff_s <= 0.0 or not effs_known:
         _effs_resumed = True
@@ -5076,13 +5257,12 @@ _council_phase_enable       = bool(_cfg["Council_Phase_Enable"])
 
 
 
-_consensus_skip_enable      = True
 _tournament_mode           = _cfg_bool("Tournament_Mode", False)
-_opponent_style            = str(_cfg.get("Opponent_Style", "auto")).strip().lower()
+_opponent_style            = _norm_str(_cfg.get("Opponent_Style", "auto"))
 if _opponent_style not in ("auto", "nnue", "dl", "none"):
     _opponent_style = "auto"
-_opponent_id_min_n               = max(1, int(_cfg.get("OppID_Min_N", 8)))
-_opponent_id_margin              = max(0.0, min(1.0, float(_cfg.get("OppID_Margin", 0.25))))
+_opponent_id_min_n               = _cint(_cfg, "OppID_Min_N", 8, lo=1)
+_opponent_id_margin              = _clamp01(float(_cfg.get("OppID_Margin", 0.25)))
 _opponent_id_nnue_names   = tuple(p.strip().lower() for p in
                             str(_cfg.get("OppID_NNUE_Names", "")).split(",")
                             if p.strip())
@@ -5092,7 +5272,7 @@ _opponent_id_dl_names     = tuple(p.strip().lower() for p in
 _opponent_id_hybrid_names = tuple(p.strip().lower() for p in
                             str(_cfg.get("OppID_Hybrid_Names", "")).split(",")
                             if p.strip())
-_draw_ply                  = max(0, int(_cfg.get("Draw_Ply", 0)))
+_draw_ply                  = _cint(_cfg, "Draw_Ply", 0, lo=0)
 
 _dl_prefetch_idp_nodes = (
     int(_cfg["DL_Prefetch_IDP_Nodes"])
@@ -5120,7 +5300,7 @@ if _pv_mate_use_nnue2 or _pv_mate_use_dl3:
     else:
         _pv_mate_source = "dl3"
 else:
-    _pv_mate_source = str(_cfg.get("PV_Mate_Source", "dl3")).strip().lower()
+    _pv_mate_source = _norm_str(_cfg.get("PV_Mate_Source", "dl3"))
     if _pv_mate_source not in ("nnue2", "dl3", "both"):
         _pv_mate_source = "dl3"
 
@@ -5132,17 +5312,17 @@ def _pv_mate_want_sources(source: str, endgame_mode: bool,
     if endgame_mode and force_nnue2_in_endgame:
         want_nnue2 = True
     return want_nnue2, want_dl3
-_pv_mate_override_max_step = max(2, int(_cfg.get("PV_Mate_Override_Max_Step", 4)))
+_pv_mate_override_max_step = _cint(_cfg, "PV_Mate_Override_Max_Step", 4, lo=2)
 if _pv_mate_override_max_step % 2 != 0:
     _pv_mate_override_max_step -= 1
 
 
 
-_monitor_interval_s      = max(5.0, float(_cfg.get("Monitor_Interval_S", 60)))
-_monitor_low_ram_warn_mb = max(0, int(_cfg.get("Monitor_Low_Ram_Warn_MB", 4096)))
+_monitor_interval_s      = _cfloat(_cfg, "Monitor_Interval_S", 60, lo=5.0)
+_monitor_low_ram_warn_mb = _cint(_cfg, "Monitor_Low_Ram_Warn_MB", 4096, lo=0)
 
-_revive_max_attempts      = max(0, int(_cfg.get("Revive_Max_Attempts", 2)))
-_revive_cooldown_s        = max(5.0, float(_cfg.get("Revive_Cooldown_S", 45.0)))
+_revive_max_attempts      = _cint(_cfg, "Revive_Max_Attempts", 2, lo=0)
+_revive_cooldown_s        = _cfloat(_cfg, "Revive_Cooldown_S", 45.0, lo=5.0)
 
 
 
@@ -5152,12 +5332,15 @@ _log_diagnosis     = bool(_cfg["Log_Diagnosis"])
 
 
 
+_unreapable_procs = []
+_unreapable_lock  = threading.Lock()
+
 class USIEngine:
     def __init__(self, path, name):
         self.path   = path
         self.name   = name
         self.proc   = None
-        self._q     = queue.Queue()
+        self._q     = queue.Queue(maxsize=50000)
         self._alive = False
         self._send_lock = threading.Lock()
         self._via_shell = False
@@ -5171,6 +5354,8 @@ class USIEngine:
         self.announced_options: set = set()
 
         self._dld_logged: set = set()
+        self._go_sent: int = 0
+        self._bm_seen: int = 0
 
     def start(self):
         if self.proc is not None:
@@ -5195,12 +5380,15 @@ class USIEngine:
                     self._q.get_nowait()
                 except queue.Empty:
                     break
-            self._q = queue.Queue()
+            self._q = queue.Queue(maxsize=50000)
             self.proc = None
             self._last_multipv_sent = None
             self._last_sp_sent = None
             self.announced_options = set()
             self._dld_logged = set()
+            self._dyn_threads_last = None
+            self._go_sent = 0
+            self._bm_seen = 0
 
         _popen_kwargs = dict(
             stdin=subprocess.PIPE,
@@ -5272,8 +5460,26 @@ class USIEngine:
                 self._job = None
             _resumed = _resume_process_main_thread(self.proc.pid)
             if not _resumed:
-                _flog(f"[{self.name}] WARNING: ResumeThread failed (pid={self.proc.pid}) "
-                      "— process may be stuck suspended")
+                _flog(f"[{self.name}] ResumeThread failed — "
+                      f"killing suspended pid={self.proc.pid}, "
+                      f"retrying without CREATE_SUSPENDED")
+                try:
+                    self.proc.kill()
+                    self.proc.wait(timeout=3)
+                except Exception:
+                    pass
+                if self._job:
+                    _job_close(self._job)
+                    self._job = None
+                _popen_kwargs["creationflags"] = _CREATE_NO_WINDOW
+                self.proc = _popen_utf8(_argv, **_popen_kwargs)
+                self._job = _job_create()
+                if self._job:
+                    if not _job_assign_pid(self._job, self.proc.pid):
+                        _job_close(self._job)
+                        self._job = None
+                _flog(f"[{self.name}] restarted without SUSPENDED "
+                      f"(pid={self.proc.pid} job={'yes' if self._job else 'no'})")
             else:
                 _flog(f"[{self.name}] started under Job Object "
                       f"(pid={self.proc.pid} job={'yes' if self._job else 'no'})")
@@ -5304,7 +5510,7 @@ class USIEngine:
                 _ln = line.rstrip("\n")
                 q.put(_ln)
                 _cb = self._live_info_cb
-                if _cb is not None and _ln.startswith("info") and "depth" in _ln and "score" in _ln:
+                if _cb is not None and _is_scored_info(_ln):
                     try:
                         _cb(_ln)
                     except Exception:
@@ -5324,6 +5530,8 @@ class USIEngine:
             with self._send_lock:
                 self.proc.stdin.write(cmd + "\n")
                 self.proc.stdin.flush()
+                if cmd.startswith("go"):
+                    self._go_sent += 1
         except BrokenPipeError:
             self._alive = False
             try:
@@ -5335,6 +5543,14 @@ class USIEngine:
             self._alive = False
             _flog(f"[{self.name}] send error: {e}")
 
+    def _note_line(self, line):
+        if line is not None and line.startswith("bestmove"):
+            self._bm_seen += 1
+        return line
+
+    def bm_is_current(self):
+        return self._bm_seen == self._go_sent
+
     def wait_for(self, keyword, timeout=300.0):
         deadline = time.perf_counter() + timeout
         while True:
@@ -5342,7 +5558,7 @@ class USIEngine:
             if remaining <= 0:
                 return None
             try:
-                line = self._q.get(timeout=min(remaining, 1.0))
+                line = self._note_line(self._q.get(timeout=min(remaining, 1.0)))
             except queue.Empty:
                 continue
             if line is None:
@@ -5359,7 +5575,7 @@ class USIEngine:
             if remaining <= 0:
                 break
             try:
-                line = self._q.get(timeout=min(remaining, 1.0))
+                line = self._note_line(self._q.get(timeout=min(remaining, 1.0)))
             except queue.Empty:
                 continue
             if line is None:
@@ -5370,9 +5586,26 @@ class USIEngine:
                 break
         return lines
 
+    def iter_until(self, keyword, timeout=60.0):
+        deadline = time.perf_counter() + timeout
+        while True:
+            remaining = deadline - time.perf_counter()
+            if remaining <= 0:
+                return
+            try:
+                line = self._note_line(self._q.get(timeout=min(remaining, 1.0)))
+            except queue.Empty:
+                continue
+            if line is None:
+                self._alive = False
+                return
+            yield line
+            if keyword in line:
+                return
+
     def readline(self, timeout=5.0):
         try:
-            line = self._q.get(timeout=timeout)
+            line = self._note_line(self._q.get(timeout=timeout))
             if line is None:
                 self._alive = False
                 return None
@@ -5405,7 +5638,7 @@ class USIEngine:
                       f"{_tail_dump()}")
                 return False
             try:
-                line = self._q.get(timeout=min(remaining, 1.0))
+                line = self._note_line(self._q.get(timeout=min(remaining, 1.0)))
             except queue.Empty:
                 continue
             if line is None:
@@ -5420,6 +5653,7 @@ class USIEngine:
                 elif _drained_count > 0:
                     _dlog(f"[{self.name}] flush_until_ready: drained "
                           f"{_drained_count} stale line(s) before readyok")
+                self._bm_seen = self._go_sent
                 return True
             _drained_count += 1
             _drained_tail.append(line)
@@ -5560,18 +5794,21 @@ class USIEngine:
             self.proc.wait(timeout=5)
             _flog(f"[{self.name}] quit: killed and reaped (rc={self.proc.returncode})")
         except subprocess.TimeoutExpired:
-            _flog(f"[{self.name}] quit: reap timeout after kill — process may be zombie")
+            _flog(f"[{self.name}] quit: reap timeout after kill — "
+                  f"tracking pid={self.proc.pid} for deferred reap")
+            with _unreapable_lock:
+                _unreapable_procs.append(self.proc)
         except Exception as e:
             _flog(f"[{self.name}] quit: reap error: {e}")
 
 
 
-def _calc_remaining_moves(move_count, our_ms=0, cfg=None):
-    _min_rem = cfg.dl_min_remaining_moves if cfg is not None else _dl_min_remaining_moves
-    _expected = cfg.rem_moves_expected_game_ply if cfg is not None else _rem_moves_expected_game_ply
+def _calc_remaining_moves(move_count, our_ms=0, *, cfg):
+    _min_rem = cfg.dl_min_remaining_moves
+    _expected = cfg.rem_moves_expected_game_ply
     _limit = min(_expected, 512)
     base_moves = max(1.0, (_limit - move_count) / 2.0)
-    return max(_min_rem, min(256, int(math.ceil(base_moves))))
+    return _clamp(int(math.ceil(base_moves)), _min_rem, 256)
 
 
 GoClockInfo = namedtuple(
@@ -5604,6 +5841,7 @@ class PonderState:
     dl3_ponder_sent:   bool                  = False
     dl1_ponder_sent:   bool                  = False
     nnue1_ponder_sent: bool                  = False
+    nnue1_dirty:       bool                  = False
     dl_ponder_pos:     object                = None
     dl2_ponder_pos:    object                = None
     def reset(self, handover_default: float) -> None:
@@ -5618,6 +5856,7 @@ class PonderState:
         self.tree_invalid      = False
         self.mate_skip_pending = False
         self.nnue1_ponder_sent = False
+        self.nnue1_dirty       = False
         self.dl1_ponder_sent   = False
         self.dl_ponder_pos     = None
         self.dl2_ponder_pos    = None
@@ -5643,7 +5882,7 @@ class Dl2RunState:
 class Dl2FetchParams:
     cache_miss                  : bool
     dl_thread                   : object
-    dl1fs                       : object
+    dl1_fetch                   : object
     policy_cache_hit            : object
     ctx                         : object
     dl_2_timeout                : float
@@ -5735,12 +5974,13 @@ class GameProgressState:
     ponder_alt_reply      : object = None
     regime_conviction       : float  = 0.5
     regime_conviction_prev  : float  = 0.5
-    regime_label           : str    = "alert"
+    regime_label           : str    = _REGIME_ALERT
     regime_force_crisis     : bool   = False
     last_momentum          : float  = 0.0
     last_tesuki_n          : object = None
     last_sharpness         : object = None
     last_dl_cont_changed   : bool   = False
+    sp_move_diag           : object = None
 
     def reset(self) -> None:
         self.last_nnue_score_cp    = 0
@@ -5801,12 +6041,13 @@ class GameProgressState:
         self.ponderhit_emit_ni            = None
         self.regime_conviction       = 0.5
         self.regime_conviction_prev  = 0.5
-        self.regime_label           = "alert"
+        self.regime_label           = _REGIME_ALERT
         self.regime_force_crisis     = False
         self.last_momentum          = 0.0
         self.last_tesuki_n          = None
         self.last_sharpness         = None
         self.last_dl_cont_changed   = False
+        self.sp_move_diag           = None
 
 
 @dataclasses.dataclass
@@ -6012,11 +6253,8 @@ class EngineConfig:
     mate_solver_path: str   = ''
     mate_solver_threads: str   = '1'
     endgame_dl_veto_min_eff_s: float = 1.5983
-    endgame_dl_veto_nodes: int   = 400
-    endgame_dl_veto_timeout_s: float = 0.4
-    endgame_dl_veto_use_dl1: bool  = True
-    endgame_dl_veto_use_dl2: bool  = False
     endgame_dl_veto_wr_margin: float = 0.1924
+    endgame_dl_veto_dl1_min_eff_s: float = 40.0
     endgame_dl_veto_game_phase_lo_scale: float = 1.0
     endgame_dl_veto_game_phase_hi_scale: float = 0.4
     endgame_fv_scale: int = 0
@@ -6070,7 +6308,6 @@ class EngineConfig:
     time_aggression_dl_cont_change_ext: float = 0.15
     auftragstaktik_dt_threshold: float = 0.95
     trivial_cap_mate_ply_max: int = 7
-    dl_3_council_weight: float = 0.2851
     council_corr_dampen: float = 0.0
     council_corr_wr_scale: float = 0.25
     dl_3_rescue_cp_threshold: int   = 0
@@ -6094,7 +6331,7 @@ class EngineConfig:
     mate_solver_min_ply: int   = 0
     book2_fire_consec: int   = 1
     book2_consec_max: int   = 1
-    book2_default_trust: str   = 'advisory'
+    book2_default_trust: str   = _TRUST_ADVISORY
     book2_pool_index: int   = 1
     book_council_bias_advisory: float = 2.6
     book_council_bias_suspect: float = 1.3
@@ -6110,7 +6347,7 @@ class EngineConfig:
     game_phase_surge_eff_s_boost:      float = 1.25
     game_phase_surge_dl_weight_boost:  float = 1.15
     game_phase_surge_dl2_timeout_boost: float = 1.3
-    dl3_proxy_mode:        str   = "boost_only"
+    dl3_proxy_mode:        str   = _PROXY_MODE_BOOST_ONLY
     dl3_proxy_fuse_alpha:  float = 0.3718
     dl3_proxy_weight_min:  float = 0.5797
     dl3_proxy_weight_max:  float = 1.7298
@@ -6175,12 +6412,20 @@ class EngineConfig:
     root_park_voi_scale:          float = 0.5
     voi_norm_cp:                  int   = 600
 
+    lerp_dl_ratio_lo:             float = 0.06
+    lerp_dl_ratio_hi:             float = 0.25
+    lerp_dl_max_ms_lo:            float = 12000.0
+    lerp_dl_max_ms_hi:            float = 40000.0
+
+    nnue_slowmover_user_set:      bool  = False
+    nnue_2_slowmover_user_set:    bool  = False
+
     @classmethod
     def from_cfg(cls, cfg: dict) -> "EngineConfig":
-        _m = str(cfg.get("DL3_Proxy_Mode", "boost_only")).strip().lower()
-        _dl3_mode_n = _m if _m in ("boost_only", "fuse", "replace") else "boost_only"
-        _dl3_wmin_n = max(0.0, float(cfg.get("DL3_Proxy_Weight_Min", 0.5797)))
-        _dl3_wmax_n = max(_dl3_wmin_n, float(cfg.get("DL3_Proxy_Weight_Max", 1.7298)))
+        _m = _norm_str(cfg.get("DL3_Proxy_Mode", _PROXY_MODE_BOOST_ONLY))
+        _dl3_mode_n = _m if _m in (_PROXY_MODE_BOOST_ONLY, _PROXY_MODE_FUSE, _PROXY_MODE_REPLACE) else _PROXY_MODE_BOOST_ONLY
+        _dl3_wmin_n = _cfloat(cfg, "DL3_Proxy_Weight_Min", 0.5797, lo=0.0)
+        _dl3_wmax_n = _cfloat(cfg, "DL3_Proxy_Weight_Max", 1.7298, lo=_dl3_wmin_n)
         return cls(
             game_phase_handover_threshold = float(cfg.get("GP_Handover_Threshold", 0.7956)),
             game_phase_handover_per_sec   = float(cfg.get("GP_Handover_Per_Sec", -0.0013)),
@@ -6198,12 +6443,12 @@ class EngineConfig:
             dl_stab_game_phase_tighten = float(cfg.get("DL_Stability_GP_Tighten", 9)),
             dl_gap_lift_score_min  = int(cfg.get("DL_Gap_Lift_Score_Min", 1452)),
             dl_gap_lift_spread_max = int(cfg.get("DL_Gap_Lift_Spread_Max", 53)),
-            consensus_skip_wait_base_ms    = max(0.0, float(cfg.get("Consensus_Skip_Wait_Base_Ms",    150.0))),
-            consensus_skip_wait_per_sec_ms = max(0.0, float(cfg.get("Consensus_Skip_Wait_Per_Sec_Ms", 20.0))),
-            consensus_skip_wait_min_ms     = max(0.0, float(cfg.get("Consensus_Skip_Wait_Min_Ms",     100.0))),
-            consensus_skip_wait_max_ms     = max(0,   int(cfg.get("Consensus_Skip_Wait_Ms",           300))),
-            consensus_skip_min_depth       = max(0,   int(cfg.get("Consensus_Skip_Min_Depth", 9))),
-            consensus_skip_score_margin_min = max(0.0, float(cfg.get("Consensus_Skip_Score_Margin_Min", 0.05))),
+            consensus_skip_wait_base_ms    = _cfloat(cfg, "Consensus_Skip_Wait_Base_Ms", 150.0, lo=0.0),
+            consensus_skip_wait_per_sec_ms = _cfloat(cfg, "Consensus_Skip_Wait_Per_Sec_Ms", 20.0, lo=0.0),
+            consensus_skip_wait_min_ms     = _cfloat(cfg, "Consensus_Skip_Wait_Min_Ms", 100.0, lo=0.0),
+            consensus_skip_wait_max_ms     = _cint(cfg, "Consensus_Skip_Wait_Ms", 300, lo=0),
+            consensus_skip_min_depth       = _cint(cfg, "Consensus_Skip_Min_Depth", 9, lo=0),
+            consensus_skip_score_margin_min = _cfloat(cfg, "Consensus_Skip_Score_Margin_Min", 0.05, lo=0.0),
             council_phase_enable = _dict_bool(cfg, "Council_Phase_Enable", True),
             dl1_weight_early     = float(cfg.get("DL1_Council_Weight_Early", 1.691)),
             dl1_weight_late      = float(cfg.get("DL1_Council_Weight_Late", 0.5786)),
@@ -6215,69 +6460,69 @@ class EngineConfig:
             dl1_depth_trust_max       = float(cfg.get("DL1_Council_Depth_Trust_Max",       1.1188)),
             dl1_game_phase_trust_min = float(cfg.get("DL1_GP_Trust_Min", 0.8732)),
             dl1_game_phase_trust_max = float(cfg.get("DL1_GP_Trust_Max", 1.0126)),
-            gap_norm_cp = max(1, int(cfg.get("GAP_NORM_CP", 500))),
-            council_nyugyoku_dl_restore = max(0.0, min(1.0, float(
-                cfg.get("Council_Nyugyoku_DL_Restore", 1.0)))),
+            gap_norm_cp = _cint(cfg, "GAP_NORM_CP", 500, lo=1),
+            council_nyugyoku_dl_restore = _clamp01(float(
+                cfg.get("Council_Nyugyoku_DL_Restore", 1.0))),
             dl1_pv_overlap_max_boost = float(cfg.get("DL1_Council_PV_Overlap_Max_Boost", 1.1816)),
             council_score_discount_threshold = float(cfg.get("Council_Score_Discount_Threshold", 184)),
-            council_score_discount_scale     = max(1.0, float(cfg.get("Council_Score_Discount_Scale", 660))),
-            council_score_discount_min       = max(0.0, min(1.0, float(cfg.get("Council_Score_Discount_Min", 0.293)))),
+            council_score_discount_scale     = _cfloat(cfg, "Council_Score_Discount_Scale", 660, lo=1.0),
+            council_score_discount_min       = _cfloat(cfg, "Council_Score_Discount_Min", 0.293, 0.0, 1.0),
             council_override_min_diff_cp = int(cfg.get("Council_Override_Min_Diff_cp", 50)),
-            council_weight_floor_early = max(0.0, min(1.0, float(cfg.get("Council_Weight_Floor_Early", 0.30)))),
-            council_weight_floor_late  = max(0.0, min(1.0, float(cfg.get("Council_Weight_Floor_Late",  0.15)))),
+            council_weight_floor_early = _cfloat(cfg, "Council_Weight_Floor_Early", 0.30, 0.0, 1.0),
+            council_weight_floor_late  = _cfloat(cfg, "Council_Weight_Floor_Late", 0.15, 0.0, 1.0),
             slow_mover_base    = float(cfg.get("SlowMover_Base",    97)),
             slow_mover_per_sec = float(cfg.get("SlowMover_Per_Sec", 7.2291)),
             slow_mover_min     = float(cfg.get("SlowMover_Min",     90)),
             slow_mover_max     = float(cfg.get("SlowMover_Max",     195)),
             dl_2_margin_ratio     = float(cfg.get("DL_2_Time_Margin_Ratio",  0.4971)),
             dl_2_margin_max_ms    = float(cfg.get("DL_2_Time_Margin_Max_ms", 27740)),
-            dl_2_latency_per_mb_s = max(0.0, float(cfg.get("DL_2_Latency_Per_MB_s", 0.005))),
-            dl_2_latency_autocal_alpha       = max(0.0, min(1.0, float(cfg.get("DL_2_Latency_Autocal_Alpha", 0.3)))),
-            dl_2_latency_autocal_min_samples = max(1, int(cfg.get("DL_2_Latency_Autocal_Min_Samples", 5))),
-            dl_2_cold_launch_latency_factor = max(1.0, float(cfg.get("DL_2_Cold_Launch_Latency_Factor", 1.1032))),
-            dl_2_wall_clock_factor = max(0.1, float(cfg.get("DL_2_Wall_Clock_Factor", 1.0))),
-            disagree_eff_s_boost_score1       = max(1.0, float(cfg.get("Disagree_Eff_S_Boost_Score1", 1.2289))),
-            disagree_eff_s_boost_score2       = max(1.0, float(cfg.get("Disagree_Eff_S_Boost_Score2", 1.3179))),
-            disagree_score_gap_threshold_cp   = max(0,   int(cfg.get("Disagree_Score_Gap_Threshold_Cp", 76))),
-            disagree_emergency_game_phase_min         = max(0.0, min(1.5, float(cfg.get("Disagree_Emergency_Gp_Min", 0.75)))),
-            disagree_emergency_score_gap_cp   = max(0,   int(cfg.get("Disagree_Emergency_Score_Gap_Cp", 300))),
-            disagree_emergency_eff_s_boost    = max(1.0, float(cfg.get("Disagree_Emergency_Eff_S_Boost", 3.0))),
-            disagree_emergency_dl2_cap        = max(1.0, float(cfg.get("Disagree_Emergency_Dl2_Cap", 4.0))),
+            dl_2_latency_per_mb_s = _cfloat(cfg, "DL_2_Latency_Per_MB_s", 0.005, lo=0.0),
+            dl_2_latency_autocal_alpha       = _cfloat(cfg, "DL_2_Latency_Autocal_Alpha", 0.3, 0.0, 1.0),
+            dl_2_latency_autocal_min_samples = _cint(cfg, "DL_2_Latency_Autocal_Min_Samples", 5, lo=1),
+            dl_2_cold_launch_latency_factor = _cfloat(cfg, "DL_2_Cold_Launch_Latency_Factor", 1.1032, lo=1.0),
+            dl_2_wall_clock_factor = _cfloat(cfg, "DL_2_Wall_Clock_Factor", 1.0, lo=0.1),
+            disagree_eff_s_boost_score1       = _cfloat(cfg, "Disagree_Eff_S_Boost_Score1", 1.2289, lo=1.0),
+            disagree_eff_s_boost_score2       = _cfloat(cfg, "Disagree_Eff_S_Boost_Score2", 1.3179, lo=1.0),
+            disagree_score_gap_threshold_cp   = _cint(cfg, "Disagree_Score_Gap_Threshold_Cp", 76, lo=0),
+            disagree_emergency_game_phase_min         = _cfloat(cfg, "Disagree_Emergency_Gp_Min", 0.75, 0.0, 1.5),
+            disagree_emergency_score_gap_cp   = _cint(cfg, "Disagree_Emergency_Score_Gap_Cp", 300, lo=0),
+            disagree_emergency_eff_s_boost    = _cfloat(cfg, "Disagree_Emergency_Eff_S_Boost", 3.0, lo=1.0),
+            disagree_emergency_dl2_cap        = _cfloat(cfg, "Disagree_Emergency_Dl2_Cap", 4.0, lo=1.0),
             arb_enable                        = _dict_bool(cfg, "ARB_Enable", True),
-            arb_movetime_min_ms               = max(50,  int(cfg.get("ARB_Movetime_Min_Ms", 200))),
-            arb_movetime_max_ms               = max(100, int(cfg.get("ARB_Movetime_Max_Ms", 1500))),
-            arb_budget_ratio                  = max(0.0, min(1.0, float(cfg.get("ARB_Budget_Ratio", 0.25)))),
+            arb_movetime_min_ms               = _cint(cfg, "ARB_Movetime_Min_Ms", 200, lo=50),
+            arb_movetime_max_ms               = _cint(cfg, "ARB_Movetime_Max_Ms", 1500, lo=100),
+            arb_budget_ratio                  = _cfloat(cfg, "ARB_Budget_Ratio", 0.25, 0.0, 1.0),
             arb_min_vote_score_cp             = int(cfg.get("ARB_Min_Vote_Score_Cp", -600)),
             arb1_enable                       = _dict_bool(cfg, "ARB1_Enable", True),
-            arb1_nnue_game_phase_min                  = max(0.0, min(1.5, float(cfg.get("ARB1_NNUE_Family_GP_Min", 0.85)))),
+            arb1_nnue_game_phase_min                  = _cfloat(cfg, "ARB1_NNUE_Family_GP_Min", 0.85, 0.0, 1.5),
             arb1_prestart_nnue2               = _dict_bool(cfg, "ARB1_Prestart_NNUE2", True),
-            arb1_prestart_timeout_s           = max(1.0, float(cfg.get("ARB1_Prestart_Timeout_S", 6.0))),
-            arb1_nnue2_hash                   = max(64,  int(cfg.get("ARB1_NNUE2_Hash", 1024))),
-            arb1_nnue1_burst_threads          = max(0,   int(cfg.get("ARB1_NNUE1_Burst_Threads", 1))),
-            maxmin_tie_margin                 = max(0.0, float(cfg.get("MaxMin_Tie_Margin", 0.05))),
+            arb1_prestart_timeout_s           = _cfloat(cfg, "ARB1_Prestart_Timeout_S", 6.0, lo=1.0),
+            arb1_nnue2_hash                   = _cint(cfg, "ARB1_NNUE2_Hash", 1024, lo=64),
+            arb1_nnue1_burst_threads          = _cint(cfg, "ARB1_NNUE1_Burst_Threads", 1, lo=0),
+            maxmin_tie_margin                 = _cfloat(cfg, "MaxMin_Tie_Margin", 0.05, lo=0.0),
             light_council_enable              = (_dict_bool(cfg, "Light_Council_Enable", False)
                                                  and _dict_bool(cfg, "DL_3_Enable", False)),
             light_council_min_eff_s           = float(cfg.get("Light_Council_Min_Eff_S", 0.5)),
             light_council_dl3_timeout_s       = max(0.05, int(cfg.get("Light_Council_DL3_Timeout_Ms", 337)) / 1000.0),
-            light_council_dl3_timeout_per_s   = max(50, int(cfg.get("Light_Council_DL3_Timeout_Per_S", 190))),
+            light_council_dl3_timeout_per_s   = _cint(cfg, "Light_Council_DL3_Timeout_Per_S", 190, lo=50),
             light_council_dl3_weight          = float(cfg.get("Light_Council_DL3_Weight", 1.0)),
             consensus_skip_nyugyoku_disable = _dict_bool(cfg, "Consensus_Skip_Nyugyoku_Disable", True),
-            council_sanity_window = max(0, int(cfg.get("Council_Sanity_Window", 3))),
-            game_phase_policy_vote_weight             = max(1.0, min(1.10, float(cfg.get("GP_Policy_Vote_Weight", 1.02)))),
-            game_phase_policy_urgent_vote_weight      = max(1.0, min(1.25, float(cfg.get("GP_Policy_Urgent_Vote_Weight", 1.08)))),
-            game_phase_policy_draw_ply_urgent_margin  = max(0, int(cfg.get("GP_Policy_Draw_Ply_Urgent_Margin", 30))),
+            council_sanity_window = _cint(cfg, "Council_Sanity_Window", 3, lo=0),
+            game_phase_policy_vote_weight             = _cfloat(cfg, "GP_Policy_Vote_Weight", 1.02, 1.0, 1.10),
+            game_phase_policy_urgent_vote_weight      = _cfloat(cfg, "GP_Policy_Urgent_Vote_Weight", 1.08, 1.0, 1.25),
+            game_phase_policy_draw_ply_urgent_margin  = _cint(cfg, "GP_Policy_Draw_Ply_Urgent_Margin", 30, lo=0),
             endgame_min_eff_s               = _endgame_min_eff_s_sanitize(cfg.get("Endgame_Min_Eff_S", 1.5)),
             endgame_min_eff_s_resume_ratio  = float(cfg.get("Endgame_Min_Eff_S_Resume_Ratio", 2.0)),
-            gpu_ponder_nodes_max              = max(max(1, int(cfg.get("DL_Prefetch_Nodes", 500))),
+            gpu_ponder_nodes_max              = max(_cint(cfg, "DL_Prefetch_Nodes", 500, lo=1),
                                                     int(cfg.get("GPU_Ponder_Nodes_Max", 200000))),
-            dl2_sp_configured                 = str(cfg.get("DL_2_Stochastic_Ponder", "true")).strip().lower(),
+            dl2_sp_configured                 = _norm_str(cfg.get("DL_2_Stochastic_Ponder", "true")),
             council_sanity_enable             = (_dict_bool(cfg, "Council_Sanity_Enable", True)
-                                                 and max(0, int(cfg.get("Council_Sanity_Window", 3))) >= 2),
+                                                 and _cint(cfg, "Council_Sanity_Window", 3, lo=0) >= 2),
             dl3_proxy_enable = _dict_bool(cfg, "DL3_Proxy_Enable", True),
-            dl3_proxy_min_eff_s = max(0.0, float(cfg.get("DL3_Proxy_Min_Eff_S", 2.0))),
-            dl3_proxy_nodes = max(0, int(cfg.get("DL3_Proxy_Nodes", 212))),
-            dl3_proxy_pv_min_depth = max(0, int(cfg.get("DL3_Proxy_PV_Min_Depth", 12))),
-            dl3_proxy_scope = str(cfg.get("DL3_Proxy_Scope", "always")).strip().lower(),
+            dl3_proxy_min_eff_s = _cfloat(cfg, "DL3_Proxy_Min_Eff_S", 2.0, lo=0.0),
+            dl3_proxy_nodes = _cint(cfg, "DL3_Proxy_Nodes", 212, lo=0),
+            dl3_proxy_pv_min_depth = _cint(cfg, "DL3_Proxy_PV_Min_Depth", 12, lo=0),
+            dl3_proxy_scope = _norm_str(cfg.get("DL3_Proxy_Scope", "always")),
             dl3_proxy_timeout_s = max(0.05, int(cfg.get("DL3_Proxy_Timeout_Ms", 337)) / 1000.0),
             dl_1_model_fast = str(cfg["DL_1_DNN_Model1_Fast"]).strip(),
             dl_2_enable = _dict_bool(cfg, "DL_2_Enable", True),
@@ -6287,50 +6532,47 @@ class EngineConfig:
             dl_2_time_multiplier = float(cfg["DL_2_Time_Multiplier"]),
             dl_3_dnn_model1 = str(cfg["DL_3_DNN_Model1"]),
             draw_ply_child_margin = int(cfg.get("Draw_Ply_Child_Margin", 2)),
-            gote_rep_council_min_count = max(2, int(cfg.get("Gote_Repetition_Council_Min_Count", 4))),
-            sente_rep_council_min_count = max(2, int(cfg.get("Sente_Repetition_Council_Min_Count", 2))),
-            game_phase_policy_draw_ply_margin = max(0, int(cfg.get("GP_Policy_Draw_Ply_Margin", 100))),
-            game_phase_policy_draw_ply_ref = max(0, int(cfg.get("GP_Policy_Draw_Ply_Ref", 256))),
+            gote_rep_council_min_count = _cint(cfg, "Gote_Repetition_Council_Min_Count", 4, lo=2),
+            sente_rep_council_min_count = _cint(cfg, "Sente_Repetition_Council_Min_Count", 2, lo=2),
+            game_phase_policy_draw_ply_margin = _cint(cfg, "GP_Policy_Draw_Ply_Margin", 100, lo=0),
+            game_phase_policy_draw_ply_ref = _cint(cfg, "GP_Policy_Draw_Ply_Ref", 256, lo=0),
             game_phase_policy_enable = _dict_bool(cfg, "GP_Policy_Enable", True),
             game_phase_surge_prospective_enable = _dict_bool(cfg, "GP_Surge_Prospective_Enable", True),
-            gpu_ponder_enable = str(cfg.get("GPU_Ponder_Enable", "false")).strip().lower() == "true",
-            gpu_ponder_nodes_per_eff_s = max(0, int(cfg.get("GPU_Ponder_Nodes_Per_Eff_S", 8000))),
-            handover_reverse_hysteresis = max(0.0, float(cfg.get("Handover_Reverse_Hysteresis", 0.12))),
-            mate_go_mate_mode = str(cfg.get("mate_solver_Go_Mate", "auto")).strip().lower(),
-            mate_ponder_enable = str(cfg.get("Mate_Ponder_Enable", "true")).strip().lower() == "true",
+            gpu_ponder_enable = _norm_str(cfg.get("GPU_Ponder_Enable", "false")) == "true",
+            gpu_ponder_nodes_per_eff_s = _cint(cfg, "GPU_Ponder_Nodes_Per_Eff_S", 8000, lo=0),
+            handover_reverse_hysteresis = _cfloat(cfg, "Handover_Reverse_Hysteresis", 0.12, lo=0.0),
+            mate_go_mate_mode = _norm_str(cfg.get("mate_solver_Go_Mate", "auto")),
+            mate_ponder_enable = _norm_str(cfg.get("Mate_Ponder_Enable", "true")) == "true",
             mate_score_ponder_skip = str(cfg.get("Mate_Score_Ponder_Skip", "true")).lower() == "true",
-            mate_skip_emergency_movetime_ms = max(50, int(cfg.get("Mate_Skip_Emergency_Movetime_Ms", 300))),
+            mate_skip_emergency_movetime_ms = _cint(cfg, "Mate_Skip_Emergency_Movetime_Ms", 300, lo=50),
             mate_solver_hash = str(cfg["mate_solver_Hash"]),
-            mate_solver_path = str(cfg["mate_solver_Path"]).strip(),
+            mate_solver_path = _mate_solver_path,
             mate_solver_threads = str(cfg["mate_solver_Threads"]),
-            endgame_dl_veto_min_eff_s = max(0.0, float(cfg.get("Endgame_DL_Veto_Min_Eff_S", 1.5983))),
-            endgame_dl_veto_nodes = max(0, int(cfg.get("Endgame_DL_Veto_Nodes", 400))),
-            endgame_dl_veto_timeout_s = max(0.05, int(cfg.get("Endgame_DL_Veto_Timeout_Ms", 400)) / 1000.0),
-            endgame_dl_veto_use_dl1 = _dict_bool(cfg, "Endgame_DL_Veto_Use_DL1", True),
-            endgame_dl_veto_use_dl2 = _dict_bool(cfg, "Endgame_DL_Veto_Use_DL2", False),
-            endgame_dl_veto_wr_margin = max(0.0, min(1.0, float(cfg.get("Endgame_DL_Veto_WR_Margin", 0.1924)))),
-            endgame_dl_veto_game_phase_lo_scale = max(0.0, float(cfg.get("Endgame_DL_Veto_GP_Lo_Scale", 1.0))),
-            endgame_dl_veto_game_phase_hi_scale = max(0.0, float(cfg.get("Endgame_DL_Veto_GP_Hi_Scale", 0.4))),
+            endgame_dl_veto_min_eff_s = _cfloat(cfg, "Endgame_DL_Veto_Min_Eff_S", 1.5983, lo=0.0),
+            endgame_dl_veto_wr_margin = _cfloat(cfg, "Endgame_DL_Veto_WR_Margin", 0.1924, 0.0, 1.0),
+            endgame_dl_veto_dl1_min_eff_s = _cfloat(cfg, "Endgame_DL_Veto_DL1_Min_Eff_S", 40.0, lo=0.0),
+            endgame_dl_veto_game_phase_lo_scale = _cfloat(cfg, "Endgame_DL_Veto_GP_Lo_Scale", 1.0, lo=0.0),
+            endgame_dl_veto_game_phase_hi_scale = _cfloat(cfg, "Endgame_DL_Veto_GP_Hi_Scale", 0.4, lo=0.0),
             endgame_fv_scale = int(cfg.get("Endgame_FV_Scale", 0)),
-            handover_reverse_hysteresis_shrink = max(0.0, min(1.0, float(cfg.get("Handover_Reverse_Hysteresis_Shrink", 0.5)))),
+            handover_reverse_hysteresis_shrink = _cfloat(cfg, "Handover_Reverse_Hysteresis_Shrink", 0.5, 0.0, 1.0),
             mate_ponder_min_game_phase_endgame = (float(cfg["Mate_Ponder_Min_GP_Endgame"])
                                            if cfg.get("Mate_Ponder_Min_GP_Endgame", "").strip()
                                            else -1.0),
             mate_cache_bidirectional = _cfg_bool("Mate_Cache_Bidirectional", True),
-            opponent_id_margin = max(0.0, min(1.0, float(cfg.get("OppID_Margin", 0.25)))),
-            opponent_id_min_n = max(1, int(cfg.get("OppID_Min_N", 8))),
-            pv_mate_dl3_nodes = max(0, int(cfg.get("PV_Mate_DL3_Nodes", 323))),
+            opponent_id_margin = _cfloat(cfg, "OppID_Margin", 0.25, 0.0, 1.0),
+            opponent_id_min_n = _cint(cfg, "OppID_Min_N", 8, lo=1),
+            pv_mate_dl3_nodes = _cint(cfg, "PV_Mate_DL3_Nodes", 323, lo=0),
             pv_mate_dl3_timeout_s = max(0.05, int(cfg.get("PV_Mate_DL3_Timeout_Ms", 463)) / 1000.0),
             pv_mate_join_timeout_s = max(0.0, int(cfg.get("PV_Mate_Join_Timeout_Ms", 400)) / 1000.0),
-            pv_mate_max_positions = max(0, int(cfg.get("PV_Mate_Max_Positions", 2))),
-            pv_mate_min_eff_s = max(0.0, float(cfg.get("PV_Mate_Min_Eff_S", 3.0))),
+            pv_mate_max_positions = _cint(cfg, "PV_Mate_Max_Positions", 2, lo=0),
+            pv_mate_min_eff_s = _cfloat(cfg, "PV_Mate_Min_Eff_S", 3.0, lo=0.0),
             pv_mate_nnue2_in_endgame = _dict_bool(cfg, "PV_Mate_NNUE2_In_Endgame", True),
-            pv_mate_override_max_step = max(2, int(cfg.get("PV_Mate_Override_Max_Step", 4))),
+            pv_mate_override_max_step = _cint(cfg, "PV_Mate_Override_Max_Step", 4, lo=2),
             sennichite_reject_gote = _dict_bool(cfg, "Sennichite_Reject_Gote", False),
             sennichite_reject_sente = _dict_bool(cfg, "Sennichite_Reject_Sente", False),
             sp_min_eff_s = float(cfg.get("Stochastic_Ponder_Min_Eff_S", 0.0)),
-            time_aggression_margin_floor = max(0.05, min(1.0, float(cfg.get("Time_Margin_Floor", 0.6159)))),
-            time_aggression_margin_k = max(0.0, float(cfg.get("Time_Margin_K", 0.9018))),
+            time_aggression_margin_floor = _cfloat(cfg, "Time_Margin_Floor", 0.6159, 0.05, 1.0),
+            time_aggression_margin_k = _cfloat(cfg, "Time_Margin_K", 0.9018, lo=0.0),
             zmf_resume_inc_ratio = float(cfg.get("Zero_Main_Fischer_Resume_Inc_Ratio", 8.0)),
             book_default_index = int(cfg.get("Book_Default_Index", _CONFIG_DEFAULTS["Book_Default_Index"])),
             book_dir = str(cfg["BookDir"]).strip(),
@@ -6343,123 +6585,127 @@ class EngineConfig:
             book_threads = int(cfg.get("Book_Threads", _CONFIG_DEFAULTS["Book_Threads"])),
             dl_1_model_default = str(cfg["DL_1_DNN_Model1"]),
             dl_time_min_ms = float(cfg["DL_Time_Min_ms"]),
-            time_aggression_game_phase_gamma = max(0.05, float(cfg.get("Time_GP_Gamma", 2.0))),
+            time_aggression_game_phase_gamma = _cfloat(cfg, "Time_GP_Gamma", 2.0, lo=0.05),
             time_aggression_game_phase_hi = float(cfg.get("Time_GP_Hi", 1.0232)),
             time_aggression_game_phase_lo = float(cfg.get("Time_GP_Lo", 0.8512)),
-            time_aggression_score_floor = max(0.05, min(1.0, float(cfg.get("Time_Score_Floor", 0.4524)))),
-            time_aggression_score_span_cp = max(1.0, float(cfg.get("Time_Score_Span_Cp", 881))),
+            time_aggression_score_floor = _cfloat(cfg, "Time_Score_Floor", 0.4524, 0.05, 1.0),
+            time_aggression_score_span_cp = _cfloat(cfg, "Time_Score_Span_Cp", 881, lo=1.0),
             time_aggression_score_start_cp = float(cfg.get("Time_Score_Start_Cp", 164)),
-            time_aggression_fall_gain = max(0.0, float(cfg.get("Time_Fall_Gain", 0.05))),
-            time_aggression_fall_floor = max(0.1, min(1.0, float(cfg.get("Time_Fall_Floor", 0.572)))),
-            time_aggression_fall_ceil = max(1.0, min(3.0, float(cfg.get("Time_Fall_Ceil", 1.708)))),
-            time_aggression_stable_reduction_min = max(0.3, min(1.0, float(cfg.get("Time_Stable_Reduction_Min", 0.85)))),
-            time_aggression_stable_streak_min = max(1, int(cfg.get("Time_Stable_Streak_Min", 3))),
-            time_aggression_ponder_bonus = max(1.0, min(1.5, float(cfg.get("Time_Ponder_Bonus", 1.0)))),
-            time_aggression_trivial_cap = max(0.05, min(1.0, float(cfg.get("Time_Trivial_Cap", 0.2)))),
-            time_aggression_decay_floor = max(0.0, min(1.0, float(cfg.get("Time_Decay_Floor", 0.35)))),
-            time_aggression_momentum_ext_gain = max(0.0, min(0.5, float(cfg.get("Time_Momentum_Ext_Gain", 0.25)))),
-            time_aggression_momentum_acc_gain = max(0.0, min(0.3, float(cfg.get("Time_Momentum_Acc_Gain", 0.10)))),
-            time_aggression_sharpness_base = max(0.5, min(1.0, float(cfg.get("Time_Sharpness_Base", 0.85)))),
-            time_aggression_sharpness_range = max(0.0, min(0.5, float(cfg.get("Time_Sharpness_Range", 0.30)))),
-            time_aggression_dl_cont_change_ext = max(0.0, min(0.5, float(cfg.get("Time_DL_Cont_Change_Ext", 0.15)))),
-            auftragstaktik_dt_threshold = max(0.5, min(1.0, float(cfg.get("Auftragstaktik_DT_Threshold", 0.95)))),
-            trivial_cap_mate_ply_max = max(1, int(cfg.get("Trivial_Cap_Mate_Ply_Max", 7))),
-            dl_3_council_weight = float(cfg["DL3_Council_Weight"]),
-            council_corr_dampen = max(0.0, min(0.5, float(cfg.get("Council_Corr_Dampen", 0.0)))),
-            council_corr_wr_scale = max(1e-3, float(cfg.get("Council_Corr_WR_Scale", 0.25))),
+            time_aggression_fall_gain = _cfloat(cfg, "Time_Fall_Gain", 0.05, lo=0.0),
+            time_aggression_fall_floor = _cfloat(cfg, "Time_Fall_Floor", 0.572, 0.1, 1.0),
+            time_aggression_fall_ceil = _cfloat(cfg, "Time_Fall_Ceil", 1.708, 1.0, 3.0),
+            time_aggression_stable_reduction_min = _cfloat(cfg, "Time_Stable_Reduction_Min", 0.85, 0.3, 1.0),
+            time_aggression_stable_streak_min = _cint(cfg, "Time_Stable_Streak_Min", 3, lo=1),
+            time_aggression_ponder_bonus = _cfloat(cfg, "Time_Ponder_Bonus", 1.0, 1.0, 1.5),
+            time_aggression_trivial_cap = _cfloat(cfg, "Time_Trivial_Cap", 0.2, 0.05, 1.0),
+            time_aggression_decay_floor = _cfloat(cfg, "Time_Decay_Floor", 0.35, 0.0, 1.0),
+            time_aggression_momentum_ext_gain = _cfloat(cfg, "Time_Momentum_Ext_Gain", 0.25, 0.0, 0.5),
+            time_aggression_momentum_acc_gain = _cfloat(cfg, "Time_Momentum_Acc_Gain", 0.10, 0.0, 0.3),
+            time_aggression_sharpness_base = _cfloat(cfg, "Time_Sharpness_Base", 0.85, 0.5, 1.0),
+            time_aggression_sharpness_range = _cfloat(cfg, "Time_Sharpness_Range", 0.30, 0.0, 0.5),
+            time_aggression_dl_cont_change_ext = _cfloat(cfg, "Time_DL_Cont_Change_Ext", 0.15, 0.0, 0.5),
+            auftragstaktik_dt_threshold = _cfloat(cfg, "Auftragstaktik_DT_Threshold", 0.95, 0.5, 1.0),
+            trivial_cap_mate_ply_max = _cint(cfg, "Trivial_Cap_Mate_Ply_Max", 7, lo=1),
+            council_corr_dampen = _cfloat(cfg, "Council_Corr_Dampen", 0.0, 0.0, 0.5),
+            council_corr_wr_scale = _cfloat(cfg, "Council_Corr_WR_Scale", 0.25, lo=1e-3),
             dl_3_rescue_cp_threshold = int(cfg["DL_3_Rescue_CP_Threshold"]),
             dl_model_routing_eff_s_threshold = float(cfg["DL_Model_Routing_Eff_S_Threshold"]),
             dl_prefetch_dl1_est_s = max(0.0, float(cfg["DL_Prefetch_DL1_Est_Ms"])) / 1000.0,
             dl_prefetch_dl2_median_s = max(0.1, float(cfg["DL_Prefetch_DL2_Median_Ms"])) / 1000.0,
-            dl_prefetch_idp_nodes = ( int(cfg["DL_Prefetch_IDP_Nodes"]) if int(cfg["DL_Prefetch_IDP_Nodes"]) > 0 else _params["POLICY_NODES"] ),
+            dl_prefetch_idp_nodes = (_v if (_v := int(cfg["DL_Prefetch_IDP_Nodes"])) > 0 else _params["POLICY_NODES"]),
             dl_prefetch_nodes = max(1, int(cfg["DL_Prefetch_Nodes"])),
             dl_prefetch_top_n = max(1, int(cfg["DL_Prefetch_Top_N"])),
             mate_solver_join_timeout_s = ( int(cfg["mate_solver_Join_Timeout_Ms"]) / 1000.0 ),
-            mate_solver_min_game_phase = max(0.0, float(cfg.get("Mate_Solver_Min_GP", 0.75))),
-            tonshi_guard_kp_threshold = max(0, min(9, int(cfg.get("Tonshi_Guard_Kp_Threshold", 4)))),
-            tonshi_guard_min_eff_s = max(0.0, float(cfg.get("Tonshi_Guard_Min_Eff_S", 1.0))),
-            tonshi_guard_movetime_max_s = max(0.05, float(cfg.get("Tonshi_Guard_Movetime_Max_S", 1.0))),
-            mate_solver_min_eff_s = max(0.0, float(cfg.get("Mate_Solver_Min_Eff_S", 1.5))),
-            mate_solver_movetime_ratio = max(0.0, float(cfg.get("Mate_Solver_Movetime_Ratio", 0.85))),
-            mate_solver_movetime_min_ms = max(50, int(cfg.get("Mate_Solver_Movetime_Min_Ms", 300))),
-            mate_solver_movetime_max_ms = max(100, int(cfg.get("Mate_Solver_Movetime_Max_Ms", 8000))),
+            mate_solver_min_game_phase = _cfloat(cfg, "Mate_Solver_Min_GP", 0.75, lo=0.0),
+            tonshi_guard_kp_threshold = _cint(cfg, "Tonshi_Guard_Kp_Threshold", 4, 0, 9),
+            tonshi_guard_min_eff_s = _cfloat(cfg, "Tonshi_Guard_Min_Eff_S", 1.0, lo=0.0),
+            tonshi_guard_movetime_max_s = _cfloat(cfg, "Tonshi_Guard_Movetime_Max_S", 1.0, lo=0.05),
+            mate_solver_min_eff_s = _cfloat(cfg, "Mate_Solver_Min_Eff_S", 1.5, lo=0.0),
+            mate_solver_movetime_ratio = _cfloat(cfg, "Mate_Solver_Movetime_Ratio", 0.85, lo=0.0),
+            mate_solver_movetime_min_ms = _cint(cfg, "Mate_Solver_Movetime_Min_Ms", 300, lo=50),
+            mate_solver_movetime_max_ms = _cint(cfg, "Mate_Solver_Movetime_Max_Ms", 8000, lo=100),
             mate_solver_parallel_movetime = _dict_bool(cfg, "Mate_Solver_Parallel_Movetime", True),
             mate_solver_council = _dict_bool(cfg, "Mate_Solver_Council", True),
             mate_solver_min_ply = int(cfg["Mate_Solver_Min_Ply"]),
-            book2_fire_consec = max(1, int(cfg.get("Book2_Fire_On_Consec", 1))),
-            book2_consec_max = max(1, int(cfg.get("Book2_Consec", 1))),
-            book2_default_trust = str(cfg.get("Book2_Default_Trust", "advisory")).strip().lower(),
+            book2_fire_consec = _cint(cfg, "Book2_Fire_On_Consec", 1, lo=1),
+            book2_consec_max = _cint(cfg, "Book2_Consec", 1, lo=1),
+            book2_default_trust = _norm_str(cfg.get("Book2_Default_Trust", _TRUST_ADVISORY)),
             book2_pool_index = int(cfg.get("Book2_Pool_Index", 1)),
-            book_council_bias_advisory = max(0.0, float(cfg.get("Book_Council_Bias_Advisory", 2.6))),
-            book_council_bias_suspect = max(0.0, float(cfg.get("Book_Council_Bias_Suspect", 1.3))),
-            book_timeout_ms = max(1, int(cfg.get("Book_Timeout_Ms", _CONFIG_DEFAULTS["Book_Timeout_Ms"]))),
+            book_council_bias_advisory = _cfloat(cfg, "Book_Council_Bias_Advisory", 2.6, lo=0.0),
+            book_council_bias_suspect = _cfloat(cfg, "Book_Council_Bias_Suspect", 1.3, lo=0.0),
+            book_timeout_ms = _cint(cfg, "Book_Timeout_Ms", _CONFIG_DEFAULTS["Book_Timeout_Ms"], lo=1),
             book_auto_turn = _dict_bool(cfg, "Book_Auto_Turn", bool(_CONFIG_DEFAULTS["Book_Auto_Turn"])),
-            book_consec_max = max(1, int(cfg.get("Book_Consec", _CONFIG_DEFAULTS["Book_Consec"]))),
-            book_hard_kill_consec = max(0, int(cfg.get("Book_Hard_Kill_Consec",
-                                                       _CONFIG_DEFAULTS.get("Book_Hard_Kill_Consec", 0)))),
-            score_stability_swing_threshold_cp = max(0,  int(cfg.get("Score_Stability_Swing_Threshold_Cp", 67))),
-            score_stability_eff_s_boost       = max(1.0, float(cfg.get("Score_Stability_Eff_S_Boost", 1.31))),
-            score_stability_game_phase_scale_min      = max(0.0, min(1.0, float(cfg.get("Score_Stability_GP_Scale_Min", 0.4481)))),
-            score_stability_game_phase_scale_max      = max(0.0, min(2.0, float(cfg.get("Score_Stability_GP_Scale_Max", 0.9889)))),
-            game_phase_surge_threshold        = max(0.0, float(cfg.get("GP_Surge_Threshold", 0.0641))),
-            game_phase_surge_eff_s_boost      = max(1.0, float(cfg.get("GP_Surge_Eff_S_Boost", 1.3129))),
-            game_phase_surge_dl_weight_boost  = max(1.0, float(cfg.get("GP_Surge_DL_Weight_Boost", 1.0574))),
-            game_phase_surge_dl2_timeout_boost = max(1.0, float(cfg.get("GP_Surge_DL2_Timeout_Boost", 1.1744))),
+            book_consec_max = _cint(cfg, "Book_Consec", _CONFIG_DEFAULTS["Book_Consec"], lo=1),
+            book_hard_kill_consec = _cint(cfg, "Book_Hard_Kill_Consec", _CONFIG_DEFAULTS.get("Book_Hard_Kill_Consec", 0), lo=0),
+            score_stability_swing_threshold_cp = _cint(cfg, "Score_Stability_Swing_Threshold_Cp", 67, lo=0),
+            score_stability_eff_s_boost       = _cfloat(cfg, "Score_Stability_Eff_S_Boost", 1.31, lo=1.0),
+            score_stability_game_phase_scale_min      = _cfloat(cfg, "Score_Stability_GP_Scale_Min", 0.4481, 0.0, 1.0),
+            score_stability_game_phase_scale_max      = _cfloat(cfg, "Score_Stability_GP_Scale_Max", 0.9889, 0.0, 2.0),
+            game_phase_surge_threshold        = _cfloat(cfg, "GP_Surge_Threshold", 0.0641, lo=0.0),
+            game_phase_surge_eff_s_boost      = _cfloat(cfg, "GP_Surge_Eff_S_Boost", 1.3129, lo=1.0),
+            game_phase_surge_dl_weight_boost  = _cfloat(cfg, "GP_Surge_DL_Weight_Boost", 1.0574, lo=1.0),
+            game_phase_surge_dl2_timeout_boost = _cfloat(cfg, "GP_Surge_DL2_Timeout_Boost", 1.1744, lo=1.0),
             dl3_proxy_mode        = _dl3_mode_n,
-            dl3_proxy_fuse_alpha  = max(0.0, min(1.0, float(cfg.get("DL3_Proxy_Fuse_Alpha", 0.3718)))),
+            dl3_proxy_fuse_alpha  = _cfloat(cfg, "DL3_Proxy_Fuse_Alpha", 0.3718, 0.0, 1.0),
             dl3_proxy_weight_min  = _dl3_wmin_n,
             dl3_proxy_weight_max  = _dl3_wmax_n,
-            dl3_proxy_nnue_base_w = max(0.0, float(cfg.get("DL3_Proxy_NNUE_Base_Weight", 1.1517))),
-            council_wr_scale_dl        = max(1e-6, float(cfg.get("Council_WR_Scale_DL", 0.0049))),
-            council_wr_scale_nnue      = max(1e-6, float(cfg.get("Council_WR_Scale_NNUE", 0.004))),
-            council_wr_scale_dl_early  = max(1e-6, float(cfg.get("Council_WR_Scale_DL_Early",  0.0044))),
-            council_wr_scale_dl_late   = max(1e-6, float(cfg.get("Council_WR_Scale_DL_Late",   0.0054))),
-            council_wr_scale_nnue_early= max(1e-6, float(cfg.get("Council_WR_Scale_NNUE_Early", 0.0036))),
-            council_wr_scale_nnue_late = max(1e-6, float(cfg.get("Council_WR_Scale_NNUE_Late",  0.0044))),
+            dl3_proxy_nnue_base_w = _cfloat(cfg, "DL3_Proxy_NNUE_Base_Weight", 1.1517, lo=0.0),
+            council_wr_scale_dl        = _cfloat(cfg, "Council_WR_Scale_DL", 0.0049, lo=1e-6),
+            council_wr_scale_nnue      = _cfloat(cfg, "Council_WR_Scale_NNUE", 0.004, lo=1e-6),
+            council_wr_scale_dl_early  = _cfloat(cfg, "Council_WR_Scale_DL_Early", 0.0044, lo=1e-6),
+            council_wr_scale_dl_late   = _cfloat(cfg, "Council_WR_Scale_DL_Late", 0.0054, lo=1e-6),
+            council_wr_scale_nnue_early= _cfloat(cfg, "Council_WR_Scale_NNUE_Early", 0.0036, lo=1e-6),
+            council_wr_scale_nnue_late = _cfloat(cfg, "Council_WR_Scale_NNUE_Late", 0.0044, lo=1e-6),
             council_wr_offset_dl       = float(cfg.get("Council_WR_Offset_DL", 0.0)),
             council_wr_offset_nnue     = float(cfg.get("Council_WR_Offset_NNUE", 0.0)),
-            council_wr_discount_scale  = max(0.0, float(cfg.get("Council_WR_Discount_Scale", 2.1053))),
-            council_wr_discount_min    = max(0.0, min(1.0, float(cfg.get("Council_WR_Discount_Min", 0.3332)))),
+            council_wr_discount_scale  = _cfloat(cfg, "Council_WR_Discount_Scale", 2.1053, lo=0.0),
+            council_wr_discount_min    = _cfloat(cfg, "Council_WR_Discount_Min", 0.3332, 0.0, 1.0),
             dl_conviction_score_threshold_cp = int(cfg.get("DL_Conviction_Score_Threshold_cp", 1959)),
             dl_conviction_score_gap_cp       = int(cfg.get("DL_Conviction_Score_Gap_cp", 538)),
-            dl_conviction_council_wait_ms    = max(0, int(cfg.get("DL_Conviction_Council_Wait_Ms", 3000))),
+            dl_conviction_council_wait_ms    = _cint(cfg, "DL_Conviction_Council_Wait_Ms", 3000, lo=0),
             game_phase_w_hand    = float(cfg.get("GP_W_Hand",    0.125335)),
             game_phase_w_promo   = float(cfg.get("GP_W_Promo",   0.0)),
             game_phase_w_camp     = float(cfg.get("GP_W_Camp",   0.107800)),
             game_phase_w_king    = float(cfg.get("GP_W_King",    0.097863)),
-            game_phase_king_ref  = max(0.1, float(cfg.get("GP_King_Ref", 1.532946))),
+            game_phase_king_ref  = _cfloat(cfg, "GP_King_Ref", 1.532946, lo=0.1),
             game_phase_nyugyoku_king_onset = float(cfg.get("GP_Nyugyoku_King_Onset", 0.345101)),
             game_phase_nyugyoku_king_full  = max(
                 float(cfg.get("GP_Nyugyoku_King_Onset", 0.345101)) + 1e-6,
                 float(cfg.get("GP_Nyugyoku_King_Full",  0.839616)),
             ),
-            game_phase_hand_ref  = max(1.0, float(cfg.get("GP_Hand_Ref",  9.278644))),
-            game_phase_promo_ref = max(1.0, float(cfg.get("GP_Promo_Ref", 5.686510))),
-            game_phase_camp_ref   = max(1.0, float(cfg.get("GP_Camp_Ref", 7.314302))),
-            game_phase_scale     = max(1e-6, float(cfg.get("GP_Scale", 1.285300))),
+            game_phase_hand_ref  = _cfloat(cfg, "GP_Hand_Ref", 9.278644, lo=1.0),
+            game_phase_promo_ref = _cfloat(cfg, "GP_Promo_Ref", 5.686510, lo=1.0),
+            game_phase_camp_ref   = _cfloat(cfg, "GP_Camp_Ref", 7.314302, lo=1.0),
+            game_phase_scale     = _cfloat(cfg, "GP_Scale", 1.285300, lo=1e-6),
             game_phase_w_ply     = float(cfg.get("GP_W_Ply", 0.524339)),
-            game_phase_ply_ref   = max(1.0, float(cfg.get("GP_Ply_Ref", 139.157857))),
+            game_phase_ply_ref   = _cfloat(cfg, "GP_Ply_Ref", 139.157857, lo=1.0),
             game_phase_ply_enable = _dict_bool(cfg, "GP_Ply_Enable", True),
             game_phase_w_exposure = float(cfg.get("GP_W_Exposure", 0.0)),
-            game_phase_exposure_ref = max(1.0, float(cfg.get("GP_Exposure_Ref", 12.244777))),
-            game_phase_child_pull = max(0.0, float(cfg.get("GP_Child_Pull", 0.0))),
+            game_phase_exposure_ref = _cfloat(cfg, "GP_Exposure_Ref", 12.244777, lo=1.0),
+            game_phase_child_pull = _cfloat(cfg, "GP_Child_Pull", 0.0, lo=0.0),
             log_engine_stderr = _dict_bool(cfg, "Log_Engine_Stderr", False),
             log_config        = _dict_bool(cfg, "Log_Config", False),
             log_diagnosis     = _dict_bool(cfg, "Log_Diagnosis", True),
             log_stats         = _dict_bool(cfg, "Log_Stats", True),
-            time_aggression_base = max(0.0, min(_TA_CEIL, float(cfg.get("Time_Aggression", 0.7601)))),
+            time_aggression_base = _cfloat(cfg, "Time_Aggression", 0.7601, 0.0, _TA_CEIL),
             policy_nodes_per_eff_s = float(cfg.get("POLICY_NODES_Per_Eff_S", 495)),
-            dl_min_remaining_moves = max(1, int(cfg.get("DL_Min_Remaining_Moves", 8))),
-            rem_moves_expected_game_ply = max(100, min(512, int(cfg.get("Rem_Moves_Expected_Game_Ply", 260)))),
+            dl_min_remaining_moves = _cint(cfg, "DL_Min_Remaining_Moves", 8, lo=1),
+            rem_moves_expected_game_ply = _cint(cfg, "Rem_Moves_Expected_Game_Ply", 260, 100, 512),
             ponder_conf_min_elapsed_s = float(cfg.get("Ponder_Conf_Min_Elapsed_S", 1.5)),
-            ponder_conf_cap_conv   = max(0.05, min(1.0, float(cfg.get("Ponder_Conf_Cap_Conv", 0.5)))),
-            ponder_conf_cap_high   = max(0.05, min(1.0, float(cfg.get("Ponder_Conf_Cap_High", 0.7)))),
-            ponder_conf_cap_medium = max(0.05, min(1.0, float(cfg.get("Ponder_Conf_Cap_Medium", 1.0)))),
-            ponder_conf_cap_low    = max(0.05, min(1.0, float(cfg.get("Ponder_Conf_Cap_Low", 1.0)))),
-            ponder_conf_cap_floor  = max(0.05, min(1.0, float(cfg.get("Ponder_Conf_Cap_Floor", 0.25)))),
-            prefetch_budget_safety_ratio = max(0.1, min(1.0, float(cfg.get("Prefetch_Budget_Safety_Ratio", 0.8)))),
-            root_park_voi_scale          = max(0.0, float(cfg.get("Root_Park_VOI_Scale", 0.5))),
-            voi_norm_cp                  = max(1, int(cfg.get("Voi_Norm_Cp", 600))),
+            ponder_conf_cap_conv   = _cfloat(cfg, "Ponder_Conf_Cap_Conv", 0.5, 0.05, 1.0),
+            ponder_conf_cap_high   = _cfloat(cfg, "Ponder_Conf_Cap_High", 0.7, 0.05, 1.0),
+            ponder_conf_cap_medium = _cfloat(cfg, "Ponder_Conf_Cap_Medium", 1.0, 0.05, 1.0),
+            ponder_conf_cap_low    = _cfloat(cfg, "Ponder_Conf_Cap_Low", 1.0, 0.05, 1.0),
+            ponder_conf_cap_floor  = _cfloat(cfg, "Ponder_Conf_Cap_Floor", 0.25, 0.05, 1.0),
+            prefetch_budget_safety_ratio = _cfloat(cfg, "Prefetch_Budget_Safety_Ratio", 0.8, 0.1, 1.0),
+            root_park_voi_scale          = _cfloat(cfg, "Root_Park_VOI_Scale", 0.5, lo=0.0),
+            voi_norm_cp                  = _cint(cfg, "Voi_Norm_Cp", 600, lo=1),
+            lerp_dl_ratio_lo             = float(cfg.get("TA_Lerp_DL_Ratio_Lo", 0.06)),
+            lerp_dl_ratio_hi             = float(cfg.get("TA_Lerp_DL_Ratio_Hi", 0.25)),
+            lerp_dl_max_ms_lo            = float(cfg.get("TA_Lerp_DL_Max_Ms_Lo", 12000.0)),
+            lerp_dl_max_ms_hi            = float(cfg.get("TA_Lerp_DL_Max_Ms_Hi", 40000.0)),
+            nnue_slowmover_user_set      = _nnue_slowmover_user_set,
+            nnue_2_slowmover_user_set    = _nnue_2_slowmover_user_set,
         )
 
 
@@ -6754,7 +7000,7 @@ def _db_parse_db_text(path: str) -> dict:
             s = line.strip()
             if not s or s.startswith("#"):
                 continue
-            if s[:4] == "sfen":
+            if s.startswith("sfen "):
                 cur_key = _book_key_from_sfen(s)
                 continue
             if cur_key is None:
@@ -6795,7 +7041,7 @@ def _db_parse_ybb(path: str) -> dict:
             raw[idx_off:idx_off + _YBB_INDEX_STRUCT.size])
         idx_off += _YBB_INDEX_STRUCT.size
         try:
-            key = _book_key_from_sfen(_decode_packed_sfen(packed_sfen))
+            key = _book_key_from_sfen(_fast_psfen_to_sfen(packed_sfen))
         except Exception:
             continue
         if not key:
@@ -6925,11 +7171,11 @@ def _book_apply_file(ctx, which: str, idx: int, book_file: str, *, send_isready:
     st.index = idx
     st.book_file = book_file
     st.label = _book_pool_label(idx)
-    st.trust = _book_pool_trust(idx, default=("absolute" if which == "book"
+    st.trust = _book_pool_trust(idx, default=(_TRUST_ABSOLUTE if which == "book"
                                                else ctx.cfg.book2_default_trust))
 
     if _book_file_is_sbk(book_file):
-        if eng is None or not eng._alive:
+        if not _eng_alive(eng):
             _flog(f"{log_tag} sbk 切替: 子エンジン不在/死亡 — 辞書のみ保持し次回 probe 時に備える。")
         position_dict = _sbk_load_book(book_file)
         if position_dict is None:
@@ -6944,7 +7190,7 @@ def _book_apply_file(ctx, which: str, idx: int, book_file: str, *, send_isready:
         return True
 
     if _book_file_is_dbybb(book_file) and _book_pool_db_inmemory(idx):
-        if eng is None or not eng._alive:
+        if not _eng_alive(eng):
             _flog(f"{log_tag} db 切替: 子エンジン不在/死亡 — 辞書のみ保持し次回 probe 時に備える。")
         position_dict = _db_load_book(book_file)
         if position_dict is None:
@@ -6961,7 +7207,7 @@ def _book_apply_file(ctx, which: str, idx: int, book_file: str, *, send_isready:
 
     st.sbk_position_dict = None
     st.db_position_dict = None
-    if eng is None or not eng._alive:
+    if not _eng_alive(eng):
         _flog(f"{log_tag} BookFile 差し替えスキップ — 子エンジン不在/死亡 (book_file={book_file!r})。")
         return False
     try:
@@ -6987,7 +7233,7 @@ class _BookState:
     index:       int  = -1
     book_file:   str  = ""
     label:       str  = ""
-    trust:       str  = "absolute"
+    trust:       str  = _TRUST_ABSOLUTE
     initialized: bool = False
     sbk_position_dict: object = None
     db_position_dict: object = None
@@ -7001,7 +7247,7 @@ class _BookState:
         self.index       = -1
         self.book_file   = ""
         self.label       = ""
-        self.trust       = "absolute"
+        self.trust       = _TRUST_ABSOLUTE
         self.initialized = False
         self.firing      = False
         self.exhausted   = False
@@ -7019,20 +7265,20 @@ def _book_pool_label(index: int) -> str:
     return _book_pool_get(index, "Label")
 
 
-_BOOK_TRUST_VALID = ("absolute", "advisory", "suspect")
+_BOOK_TRUST_VALID = (_TRUST_ABSOLUTE, _TRUST_ADVISORY, _TRUST_SUSPECT)
 
 
-def _book_pool_trust(index: int, default: str = "absolute") -> str:
-    t = str(_cfg.get(f"Book_Pool_{index}_Trust", "")).strip().lower()
+def _book_pool_trust(index: int, default: str = _TRUST_ABSOLUTE) -> str:
+    t = _norm_str(_cfg.get(f"Book_Pool_{index}_Trust", ""))
     if t in _BOOK_TRUST_VALID:
         return t
-    return default if default in _BOOK_TRUST_VALID else "absolute"
+    return default if default in _BOOK_TRUST_VALID else _TRUST_ABSOLUTE
 
 
 def _book_council_bias_for_trust(trust: str, cfg) -> float:
-    if trust == "advisory":
+    if trust == _TRUST_ADVISORY:
         return cfg.book_council_bias_advisory
-    if trust == "suspect":
+    if trust == _TRUST_SUSPECT:
         return cfg.book_council_bias_suspect
     return 0.0
 
@@ -7040,7 +7286,7 @@ def _book_council_bias_for_trust(trust: str, cfg) -> float:
 def _book_normalize_turn(turn) -> str:
     if turn is None:
         return ""
-    t = str(turn).strip().lower()
+    t = _norm_str(turn)
     if t in ("+", "b", "black", "sente"):
         return "+"
     if t in ("-", "w", "white", "gote"):
@@ -7050,12 +7296,6 @@ def _book_normalize_turn(turn) -> str:
 
 def _book_resolve_index(turn: str, cfg) -> int:
     nt = _book_normalize_turn(turn)
-    if not cfg.book_auto_turn:
-        if nt == "+":
-            return cfg.book_sente_index
-        if nt == "-":
-            return cfg.book_gote_index
-        return cfg.book_default_index
     if nt == "+":
         return cfg.book_sente_index
     if nt == "-":
@@ -7068,7 +7308,7 @@ def _book_normalize_filename(name: str) -> str:
     if not n or n.lower() == "no_book":
         return n
     _low = n.lower()
-    if _low.endswith(".ybb") or _low.endswith(".db") or _low.endswith(".bin") or _low.endswith(".sbk"):
+    if _low.endswith((".ybb", ".db", ".bin", ".sbk")):
         return n
     return n + ".ybb"
 
@@ -7105,7 +7345,7 @@ def _book_start_engine(ctx) -> bool:
     return True
 
 def _book_begin_game(ctx, turn: str = "") -> None:
-    if ctx.book is None or not ctx.book._alive:
+    if not _eng_alive(ctx.book):
         if _book_enabled:
             _flog("[bookloader] usinewgame: Book エンジンが不在/死亡 — 再起動を試みます。")
             if ctx.book is not None:
@@ -7115,12 +7355,11 @@ def _book_begin_game(ctx, turn: str = "") -> None:
                     _flog(f"[bookloader] 既存ハンドルの quit 例外 (無視): {_qe}")
                 ctx.book = None
             _book_start_engine(ctx)
-        if ctx.book is None or not ctx.book._alive:
+        if not _eng_alive(ctx.book):
             ctx.book_state.active = False
             return
     st = ctx.book_state
     st.active = True
-    st.consec = 0
     nt = _book_normalize_turn(turn)
     st.turn = nt
     st.turn_hint = ""
@@ -7229,7 +7468,20 @@ def _mirror_sfen_board(board_s: str) -> str:
 def _mirror_sfen_hand(hand_s: str) -> str:
     if hand_s == "-" or not hand_s:
         return "-"
-    return hand_s.swapcase()
+    _canon = "RBGSNLP"
+    upper = {}
+    lower = {}
+    for _cnt, _pc in re.findall(r"(\d*)([A-Za-z])", hand_s):
+        _flip = _pc.swapcase()
+        (upper if _flip.isupper() else lower)[_flip.upper()] = _cnt
+    out = []
+    for _p in _canon:
+        if _p in upper:
+            out.append(upper[_p] + _p)
+    for _p in _canon:
+        if _p in lower:
+            out.append(lower[_p] + _p.lower())
+    return "".join(out) if out else "-"
 
 
 def _mirror_sfen_key(key: str) -> str:
@@ -7377,7 +7629,7 @@ def _sbk_probe_position(st, position_cmd: str):
     if not bucket:
         return (False, None)
     moves = list(bucket.keys())
-    weights = [max(int(bucket[m]), 0) for m in moves]
+    weights = [max(int(bucket[m] or 0), 0) for m in moves]
     if sum(weights) <= 0:
         move = random.choice(moves)
     else:
@@ -7396,7 +7648,7 @@ def _book_probe(ctx, position_cmd: str, eng=None, st=None):
         return _sbk_probe_position(st, position_cmd)
     if st is not None and getattr(st, "db_position_dict", None) is not None:
         return _db_probe_position(st, position_cmd)
-    if eng is None or not eng._alive:
+    if not _eng_alive(eng):
         return (False, None)
     while True:
         try:
@@ -7426,7 +7678,7 @@ def _book_probe(ctx, position_cmd: str, eng=None, st=None):
             _bk_tot_ms = ((_bk_ck.remaining_ms or 0) + (_bk_ck.floor_ms or 0)
                           + (_bk_ck.inc_ms or 0))
             if _bk_tot_ms > 0:
-                _bk_grace_s = max(0.3, min(2.0, _bk_tot_ms / 1000.0 * 0.10))
+                _bk_grace_s = _clamp(_bk_tot_ms / 1000.0 * 0.10, 0.3, 2.0)
                 if _bk_tot_ms >= 8000:
                     _bk_grace_s = max(_bk_grace_s, 1.5)
     except Exception:
@@ -7490,7 +7742,7 @@ def _book_try_move(ctx, position_cmd: str, eng=None, st=None, kill_fn=None,
         kill_fn = _book_kill
     if consec_max is None:
         consec_max = ctx.cfg.book_consec_max
-    if not _book_enabled or not st.active or eng is None or not eng._alive:
+    if not _book_enabled or not st.active or not _eng_alive(eng):
         return None
     if st is ctx.book_state:
         _book_maybe_resolve_turn_from_position(ctx, position_cmd)
@@ -7518,14 +7770,14 @@ def _book_consult(ctx, position_cmd: str):
     if (ctx.book_state.turn == "+"
             and not ctx.book2_state.exhausted
             and ctx.book_state.consec >= ctx.cfg.book2_fire_consec
-            and (ctx.book2 is None or not ctx.book2._alive)):
+            and (not _eng_alive(ctx.book2))):
         _book2_fire_async(ctx)
 
     return (None, "")
 
 
 def _book2_fire(ctx) -> None:
-    if ctx.book2 is not None and ctx.book2._alive:
+    if _eng_alive(ctx.book2):
         return
     _idx = ctx.cfg.book2_pool_index
     _bf = _book_resolve_file(_idx)
@@ -7542,18 +7794,24 @@ def _book2_fire(ctx) -> None:
         st.consec = 0
         st.turn = ctx.book_state.turn
         _ok = _book_apply_file(ctx, "book2", _idx, _bf, send_isready=False)
-        st.initialized = True
-        _flog(f"[bookloader2] 第2 Book ({_b2_kind}) 起動成功 pool={_idx} book_file={_bf!r} "
-              f"label={st.label!r} trust={st.trust!r} apply_ok={_ok}")
+        st.initialized = _ok
+        if not _ok:
+            _flog(f"[bookloader2] 第2 Book ({_b2_kind}) apply 失敗 pool={_idx} "
+                  f"book_file={_bf!r} — 初期化未完了扱い。")
+        else:
+            _flog(f"[bookloader2] 第2 Book ({_b2_kind}) 起動成功 pool={_idx} book_file={_bf!r} "
+                  f"label={st.label!r} trust={st.trust!r}")
     except Exception as e:
         _flog(f"[bookloader2] {_b2_kind} 起動例外 — 第2 Book 無効化: {e}")
         ctx.book2 = None
         ctx.book2_state.active = False
+
+
 def _book2_fire_async(ctx) -> None:
     st = ctx.book2_state
     if st.firing:
         return
-    if ctx.book2 is not None and ctx.book2._alive:
+    if _eng_alive(ctx.book2):
         return
     st.firing = True
 
@@ -7571,7 +7829,7 @@ def _book2_fire_async(ctx) -> None:
 
 def _book2_probe_seed_if_ready(ctx, position_cmd: str):
     st = ctx.book2_state
-    if not (ctx.book2 is not None and ctx.book2._alive
+    if not (_eng_alive(ctx.book2)
             and st.active and st.initialized):
         return (None, "")
     hit, move = _book_probe(ctx, position_cmd, eng=ctx.book2, st=st)
@@ -7598,10 +7856,10 @@ def _book2_kill(ctx, reason: str = "") -> None:
 def _book_any_active(ctx) -> bool:
     if not _book_enabled:
         return False
-    if (ctx.book is not None and ctx.book._alive
+    if (_eng_alive(ctx.book)
             and ctx.book_state.active and ctx.book_state.initialized):
         return True
-    if (ctx.book2 is not None and ctx.book2._alive
+    if (_eng_alive(ctx.book2)
             and ctx.book2_state.active and ctx.book2_state.initialized):
         return True
     return False
@@ -7634,7 +7892,7 @@ class EngineContext:
         "game_log", "game_meta",
         "nnue_root_history",
         "nnue_health",
-        "gps",
+        "game_progress",
         "cfg",
         "time_aggression",
         "bestmove_sink",
@@ -7673,7 +7931,7 @@ class EngineContext:
         self.game_meta               = {"endgame_triggered": False, "result": "unknown"}
         self.nnue_root_history       = []
         self.nnue_health = NnueHealthState()
-        self.gps         = GameProgressState(dl_1_model_current=dl_1_model_default)
+        self.game_progress = GameProgressState(dl_1_model_current=dl_1_model_default)
         self.cfg         = eng_cfg
         self.time_aggression = TimeAggressionState.from_config(
             base=_time_aggression_base,
@@ -7707,7 +7965,7 @@ class EngineContext:
         self.game_meta["result"]              = "unknown"
         self.ps.reset(_game_phase_handover_default)
         self.nnue_root_history.clear()
-        self.gps.reset()
+        self.game_progress.reset()
         self.nnue_health.reset()
         for _lr_eng in (self.nnue_1, self.nnue_2, self.dl_1, self.dl_2, self.dl_3):
             if _lr_eng is not None:
@@ -7764,7 +8022,7 @@ def _resolve_ponder_clock(ctx, label):
     return None
 
 
-def _parse_go_clock_base(go_line, our_side_ply=None):
+def _parse_go_clock_base(go_line, our_side_ply=None, cfg=None):
     remaining_ms = 0
     floor_ms     = 0
     eff_s        = 0.0
@@ -7875,7 +8133,7 @@ def _parse_go_clock_base(go_line, our_side_ply=None):
         eff_s = 0.0
     else:
         if _clock_is_sente is not None:
-            rem_moves = _calc_remaining_moves(our_side_ply, remaining_ms)
+            rem_moves = _calc_remaining_moves(our_side_ply, remaining_ms, cfg=cfg)
             if (inc_ms > 0 and _fischer_horizon_moves > 0
                     and rem_moves > _fischer_horizon_moves):
                 _orig_rem_moves = rem_moves
@@ -7928,12 +8186,12 @@ def _compute_dl_timeout_s(clock_base, score_cp=0, fischer_cap_bound=False, dl_sk
     remaining_ms = clock_base.remaining_ms
     floor_ms = clock_base.floor_ms
     if remaining_ms == 0 and floor_ms == 0:
-        _fb = _tdg.dl_time_fallback_ms / 1000.0
+        _fb = _time_dyn.dl_time_fallback_ms / 1000.0
         _dlog(f"DL timeout: no usable clock → fallback {_fb:.2f}s")
         return _fb
     effective_ms = eff_s * 1000.0
-    _effective_ratio = max(0.01, min(0.95,
-        _tdg.dl_time_ratio + _dl_time_ratio_eff_s_coef * eff_s))
+    _effective_ratio = _clamp(
+        _time_dyn.dl_time_ratio + _dl_time_ratio_eff_s_coef * eff_s, 0.01, 0.95)
     ratio_budget = effective_ms * _effective_ratio
     if remaining_ms == 0:
         effective_min_ms = min(_dl_time_min_ms, ratio_budget)
@@ -7943,10 +8201,10 @@ def _compute_dl_timeout_s(clock_base, score_cp=0, fischer_cap_bound=False, dl_sk
             effective_min_ms = min(_dl_time_min_ms, _eff_based_cap_ms)
         elif _dl_time_min_eff_s_cap_ratio > 0.0 and eff_s > 0.0:
             _eff_based_cap_ms = eff_s * 1000.0 * _dl_time_min_eff_s_cap_ratio
-            effective_min_ms = min(_dl_time_min_ms, max(ratio_budget, _eff_based_cap_ms))
+            effective_min_ms = _clamp(_eff_based_cap_ms, ratio_budget, _dl_time_min_ms)
         else:
             effective_min_ms = _dl_time_min_ms
-    budget_ms = max(effective_min_ms, min(_tdg.dl_time_max_ms, ratio_budget))
+    budget_ms = _clamp(ratio_budget, effective_min_ms, _time_dyn.dl_time_max_ms)
     score_scale = 1.0
     if remaining_ms > 0 and score_cp > 0:
         score_scale = max(0.0, 1.0 - score_cp / 1000.0)
@@ -7956,16 +8214,16 @@ def _compute_dl_timeout_s(clock_base, score_cp=0, fischer_cap_bound=False, dl_sk
     _dlog(
         f"DL timeout: remaining={remaining_ms}ms "
         f"+ byoyomi/inc={floor_ms}ms = eff={effective_ms:.0f}ms "
-        f"x {_tdg.dl_time_ratio} -> budget={budget_ms:.0f}ms "
+        f"x {_time_dyn.dl_time_ratio} -> budget={budget_ms:.0f}ms "
         f"(min={effective_min_ms:.0f}[{'capped-byoyomi' if remaining_ms == 0 else 'fischer-bound' if fischer_cap_bound else 'capped-effs' if (_dl_time_min_eff_s_cap_ratio > 0.0 and effective_min_ms < _dl_time_min_ms) else 'fixed'}] "
-        f"max={_tdg.dl_time_max_ms:.0f}) score_scale={score_scale:.3f}"
+        f"max={_time_dyn.dl_time_max_ms:.0f}) score_scale={score_scale:.3f}"
         f"(score_cp={score_cp}) -> {_scaled_ms / 1000:.2f}s"
     )
     return _scaled_ms / 1000.0
 
 
-def _parse_go_clock(go_line, our_side_ply=None, score_cp=0):
-    base, _fcb, _dls = _parse_go_clock_base(go_line, our_side_ply)
+def _parse_go_clock(go_line, our_side_ply=None, score_cp=0, cfg=None):
+    base, _fcb, _dls = _parse_go_clock_base(go_line, our_side_ply, cfg=cfg)
     dl_to = _compute_dl_timeout_s(base, score_cp,
                                    fischer_cap_bound=_fcb, dl_skip=_dls)
     return base._replace(dl_timeout_s=dl_to)
@@ -7979,47 +8237,46 @@ def _get_handover_game_phase(eff_s, cfg) -> float:
     if _per_sec == 0.0 or eff_s is None:
         return _checked_range(_threshold, 0.0, 1.0, "handover_game_phase(fixed)")
     raw = _threshold + eff_s * _per_sec
-    clamped = max(_game_phase_min, min(_game_phase_max, raw))
+    clamped = _clamp(raw, _game_phase_min, _game_phase_max)
     return _checked_range(clamped, 0.0, 1.0, "handover_game_phase(dynamic)")
 
 
 def _game_phase_response(game_phase: float, coef: float) -> float:
     if coef == 0.0:
         return 0.0
-    g = 0.0 if game_phase < 0.0 else (1.0 if game_phase > 1.0 else game_phase)
-    return coef * g
+    return coef * _clamp01(game_phase)
 
 
-def _calc_dl_score_gap_min(eff_s: float, cfg=None, game_phase: float = 0.0) -> int:
-    _base    = cfg.dl_gap_min_base    if cfg is not None else _dl_gap_min_base
-    _per_sec = cfg.dl_gap_min_per_sec if cfg is not None else _dl_gap_min_per_sec
-    _min     = cfg.dl_gap_min_min     if cfg is not None else _dl_gap_min_min
-    _max     = cfg.dl_gap_min_max     if cfg is not None else _dl_gap_min_max
-    _game_phase_coef = cfg.dl_gap_min_game_phase_coef if cfg is not None else _dl_gap_min_game_phase_coef
+def _calc_dl_score_gap_min(eff_s: float, cfg, game_phase: float = 0.0) -> int:
+    _base    = cfg.dl_gap_min_base
+    _per_sec = cfg.dl_gap_min_per_sec
+    _min     = cfg.dl_gap_min_min
+    _max     = cfg.dl_gap_min_max
+    _game_phase_coef = cfg.dl_gap_min_game_phase_coef
     raw = _base + eff_s * _per_sec + _game_phase_response(game_phase, _game_phase_coef)
-    return int(round(max(_min, min(_max, raw))))
+    return int(round(_clamp(raw, _min, _max)))
 
 
 
 def _calc_dl_model_aware_stability_threshold(eff_s: float, model_mb: float = None,
                                       nodes: int = None, game_phase: float = 0.0,
-                                      cfg=None) -> int:
-    _stab_max       = cfg.dl_stab_max       if cfg is not None else _dl_stab_max
-    _stab_base      = cfg.dl_stab_base      if cfg is not None else _dl_stab_base
-    _stab_per_sec   = cfg.dl_stab_per_sec   if cfg is not None else _dl_stab_per_sec
-    _stab_min       = cfg.dl_stab_min       if cfg is not None else _dl_stab_min
-    _game_phase_tighten     = cfg.dl_stab_game_phase_tighten if cfg is not None else _dl_stab_game_phase_tighten
+                                      *, cfg) -> int:
+    _stab_max       = cfg.dl_stab_max
+    _stab_base      = cfg.dl_stab_base
+    _stab_per_sec   = cfg.dl_stab_per_sec
+    _stab_min       = cfg.dl_stab_min
+    _game_phase_tighten     = cfg.dl_stab_game_phase_tighten
     if _stab_max == 0:
         return 0
     raw = _stab_base + eff_s * _stab_per_sec
-    base_threshold = max(_stab_min, min(_stab_max, raw))
+    base_threshold = _clamp(raw, _stab_min, _stab_max)
     if model_mb is not None and model_mb < 200.0:
         model_factor = 3.0
     elif model_mb is not None and model_mb < 400.0:
         model_factor = 2.0
     else:
         model_factor = 1.0
-    effective_nodes = nodes if nodes else _params.get("POLICY_NODES", 2000)
+    effective_nodes = nodes if nodes else _params["POLICY_NODES"]
     if effective_nodes < 1500:
         node_factor = 2.0
     elif effective_nodes < 3000:
@@ -8035,7 +8292,7 @@ def _calc_dl_model_aware_stability_threshold(eff_s: float, model_mb: float = Non
 
 
 def _calc_weight_floor_gp(game_phase, floor_early, floor_late):
-    gp = max(0.0, min(1.0, game_phase if game_phase is not None else 0.0))
+    gp = _clamp01(game_phase if game_phase is not None else 0.0)
     return floor_early + (floor_late - floor_early) * gp
 
 
@@ -8093,19 +8350,19 @@ def _calc_slow_mover(eff_s, cfg, time_aggression=None):
     per_sec = cfg.slow_mover_per_sec
     lo      = cfg.slow_mover_min
     hi      = cfg.slow_mover_max
-    time_aggression_eff      = time_aggression if time_aggression is not None else _tdg.time_aggression
+    time_aggression_eff      = time_aggression if time_aggression is not None else _time_dyn.time_aggression
 
     per_sec_eff = per_sec * time_aggression_eff
-    _t_for_max = max(0.0, min(1.0, time_aggression_eff))
+    _t_for_max = _clamp01(time_aggression_eff)
     max_eff     = lo + (hi - lo) * _t_for_max
     raw = base + eff_s * per_sec_eff
-    return int(round(max(lo, min(max_eff, raw))))
+    return int(round(_clamp(raw, lo, max_eff)))
 
 
 def _calc_per_move_thresholds(eff_s, cfg, game_phase: float = 0.0):
     return _PerMoveThresholds(
         gap_min    = _calc_dl_score_gap_min(eff_s, cfg=cfg, game_phase=game_phase),
-        stab       = _calc_dl_model_aware_stability_threshold(eff_s, model_mb=_dl1_mb_for_stab, nodes=_params.get("POLICY_NODES", 2000), game_phase=game_phase, cfg=cfg),
+        stab       = _calc_dl_model_aware_stability_threshold(eff_s, model_mb=_dl1_mb_for_stab, nodes=_params["POLICY_NODES"], game_phase=game_phase, cfg=cfg),
         slow_mover = _calc_slow_mover(eff_s, cfg=cfg),
     )
 
@@ -8116,27 +8373,27 @@ def _calc_dynamic_policy_nodes(eff_s, cfg):
         return base
     per_eff_s = cfg.policy_nodes_per_eff_s
     raw = int(eff_s * per_eff_s)
-    return max(base, min(10000, raw))
+    return _clamp(raw, base, 10000)
 
 
-def _ponderhit_calc_relay_timeout(relay_line, move_count, ponder_clock):
+def _ponderhit_calc_relay_timeout(relay_line, move_count, ponder_clock, cfg=None):
     eff_s_fallback = ponder_clock.eff_s if ponder_clock is not None else 0.0
-    clock, _, _ = _parse_go_clock_base(relay_line, move_count)
+    clock, _, _ = _parse_go_clock_base(relay_line, move_count, cfg=cfg)
     eff_s = clock.eff_s if clock.eff_s > 0 else eff_s_fallback
     budget_ms = eff_s * 1000.0
 
     byo_raw   = clock.floor_ms + _move_overhead_ms
-    r_floor   = _lerp(0.04, 0.07, _tdg.time_aggression)
-    r_ceil    = _lerp(0.18, 0.33, _tdg.time_aggression)
-    r_byo     = _lerp(0.10, 0.20, _tdg.time_aggression)
+    r_floor   = _lerp(0.04, 0.07, _time_dyn.time_aggression)
+    r_ceil    = _lerp(0.18, 0.33, _time_dyn.time_aggression)
+    r_byo     = _lerp(0.10, 0.20, _time_dyn.time_aggression)
     buf_floor = max(50,  int(eff_s * 1000 * r_floor))
     buf_ceil  = max(int(eff_s * 1000 * 0.12), int(eff_s * 1000 * r_ceil))
-    margin_ms = max(buf_floor, min(buf_ceil, int(byo_raw * r_byo)))
+    margin_ms = _clamp(int(byo_raw * r_byo), buf_floor, buf_ceil)
 
     if budget_ms > 0:
         _to_floor_native = max(_move_overhead_s, budget_ms * 0.30 / 1000.0)
         return max(_to_floor_native, (budget_ms - margin_ms) / 1000.0)
-    return _tdg.dl_time_fallback_ms * 2 / 1000.0
+    return _time_dyn.dl_time_fallback_ms * 2 / 1000.0
 
 
 def _calc_dynamic_top_n(go_ponder_clock, base_n, cfg):
@@ -8146,15 +8403,12 @@ def _calc_dynamic_top_n(go_ponder_clock, base_n, cfg):
 
     idp_overhead_s = 0.0
     if cfg.dl_prefetch_idp_nodes > 0:
-        effective_policy_nodes = _params.get("POLICY_NODES", 2000)
+        effective_policy_nodes = _params["POLICY_NODES"]
         _base_idp_overhead_s = cfg.dl_prefetch_dl1_est_s * (
             cfg.dl_prefetch_idp_nodes / max(1, effective_policy_nodes)
         )
-        if cfg.dl_prefetch_idp_nodes > 0:
-            j_count = max(0, base_n - 1)
-            idp_overhead_s = _base_idp_overhead_s * (1 + j_count)
-        else:
-            idp_overhead_s = _base_idp_overhead_s
+        j_count = max(0, base_n - 1)
+        idp_overhead_s = _base_idp_overhead_s * (1 + j_count)
 
     budget_s = eff_s - cfg.dl_prefetch_dl1_est_s - idp_overhead_s
     if budget_s <= 0:
@@ -8172,7 +8426,7 @@ def _prefetch_budget_arms_core(
     if opponent_remaining_s is None or per_arm_est_s <= 0.0:
         return max(1, int(requested_top_n))
     affordable = int((opponent_remaining_s * safety_ratio) / per_arm_est_s)
-    return max(1, min(int(requested_top_n), affordable))
+    return _clamp(affordable, 1, int(requested_top_n))
 
 
 def _root_park_budget_core(
@@ -8180,7 +8434,7 @@ def _root_park_budget_core(
     max_voi_among_arms,
     park_voi_scale,
 ):
-    factor = 1.0 + park_voi_scale * max(0.0, min(1.0, max_voi_among_arms))
+    factor = 1.0 + park_voi_scale * _clamp01(max_voi_among_arms)
     return int(base_park_nodes * factor)
 
 
@@ -8188,7 +8442,7 @@ def _voi_weighted_hit_core(hit, arm_voi):
     raw = 1.0 if hit else 0.0
     if not hit:
         return raw, 0.0
-    voi = 0.0 if arm_voi is None else max(0.0, min(1.0, arm_voi))
+    voi = 0.0 if arm_voi is None else _clamp01(arm_voi)
     return raw, 1.0 + voi
 
 
@@ -8199,7 +8453,7 @@ def _update_latency_ewma(prev_ewma, prev_count, observed_fetch_ms, model_mb, alp
     sample = (observed_fetch_ms / 1000.0) / model_mb
     if prev_count <= 0 or prev_ewma is None:
         return sample, 1
-    a = max(0.0, min(1.0, alpha))
+    a = _clamp01(alpha)
     return (1.0 - a) * prev_ewma + a * sample, prev_count + 1
 
 
@@ -8218,10 +8472,10 @@ def _calc_dl_2_time_margin_ms(eff_s: float, model_mb: float,
     lat_permb = cfg.dl_2_latency_per_mb_s
     if latency_per_mb_override is not None:
         lat_permb = latency_per_mb_override
-    min_ms   = margin_min_ms if margin_min_ms is not None else _tdg.dl_2_margin_min_ms
+    min_ms   = margin_min_ms if margin_min_ms is not None else _time_dyn.dl_2_margin_min_ms
 
     base_ms = eff_s * ratio * 1000.0
-    base_ms = max(min_ms, min(max_ms, base_ms))
+    base_ms = _clamp(base_ms, min_ms, max_ms)
 
     latency_ms = (model_mb * lat_permb * 1000.0) if model_mb is not None else 0.0
 
@@ -8249,11 +8503,11 @@ def _parse_position_moves(position_cmd: str):
 def _advance_live_board(pos: str) -> "ShogiBoard":
     old_pos, old_board = _LIVE_BOARD
     if old_board is not None and old_pos:
-        ob, om = _parse_position_moves(old_pos)
-        nb, nm = _parse_position_moves(pos)
-        if ob == nb and len(om) <= len(nm) and nm[:len(om)] == om:
+        old_base, old_moves = _parse_position_moves(old_pos)
+        new_base, new_moves = _parse_position_moves(pos)
+        if old_base == new_base and len(old_moves) <= len(new_moves) and new_moves[:len(old_moves)] == old_moves:
             b = old_board.clone()
-            for m in nm[len(om):]:
+            for m in new_moves[len(old_moves):]:
                 b.apply_usi(m)
             return b
     return ShogiBoard(sfen=pos, track_history=False)
@@ -8345,7 +8599,7 @@ def _calc_state_phase(WHAND: int, PROMO: int, CAMP: int, KING: float,
         nyugyoku_bonus = 0.5 * frac
 
     game_phase = game_phase_core + nyugyoku_bonus
-    return max(0.0, min(1.5, game_phase))
+    return _clamp(game_phase, 0.0, 1.5)
 
 
 
@@ -8371,7 +8625,7 @@ def _calc_game_phase(position_cmd: str, cfg,
     if child_agreement is not None:
         disagreement = 1.0 - child_agreement
         gp = gp - (gp - 0.5) * disagreement * cfg.game_phase_child_pull
-    return max(0.0, min(1.5, gp))
+    return _clamp(gp, 0.0, 1.5)
 
 
 
@@ -8394,7 +8648,7 @@ def _calc_dl_depth_trust(depth: int, cfg) -> float:
     if depth is None:
         return _trust_max
     raw = _trust_base + depth * _trust_per_depth
-    return max(_trust_min, min(_trust_max, raw))
+    return _clamp(raw, _trust_min, _trust_max)
 
 
 def _calc_dl_phase_trust(game_phase, cfg, score_gap=None):
@@ -8403,9 +8657,8 @@ def _calc_dl_phase_trust(game_phase, cfg, score_gap=None):
     if _trust_max < _trust_min:
         _trust_max = _trust_min
     if score_gap is not None:
-        _g = score_gap / cfg.gap_norm_cp if cfg.gap_norm_cp > 0 else 0.0
-        _g = 0.0 if _g < 0.0 else (1.0 if _g > 1.0 else _g)
-        return _trust_max - _g * (_trust_max - _trust_min)
+        gap_ratio = _clamp01(score_gap / cfg.gap_norm_cp if cfg.gap_norm_cp > 0 else 0.0)
+        return _trust_max - gap_ratio * (_trust_max - _trust_min)
     return _trust_max - game_phase * (_trust_max - _trust_min)
 
 
@@ -8413,7 +8666,7 @@ def _calc_dl_pv_overlap_boost(pv_overlap, cfg):
     if pv_overlap is None:
         return 1.0
     _max_boost = cfg.dl1_pv_overlap_max_boost
-    t = max(0.0, min(1.0, pv_overlap / 2.0))
+    t = _clamp01(pv_overlap / 2.0)
     return 1.0 + (_max_boost - 1.0) * t
 
 
@@ -8471,8 +8724,7 @@ def _win_rate_params_for_phase(game_phase, family, cfg):
         offset = cfg.council_wr_offset_nnue
     if game_phase is None:
         return anchor, 0.0
-    prog = _game_phase_for_phase_council(game_phase, cfg.council_nyugyoku_dl_restore)
-    prog = 0.0 if prog < 0.0 else 1.0 if prog > 1.0 else prog
+    prog = _clamp01(_game_phase_for_phase_council(game_phase, cfg.council_nyugyoku_dl_restore))
     slope_eff = early + (late - early) * prog
     if slope_eff < 1e-6:
         slope_eff = 1e-6
@@ -8635,15 +8887,15 @@ def _council_vote(dl_top, dl_2_top, nnue_top, ply=0,
         w_dl1 = 1.0
         w_dl2 = 1.0
 
-    _dt_dl1 = 1.0
+    _depth_trust_dl1 = 1.0
     if dl_top_depth is not None:
-        _dt_dl1 = _calc_dl_depth_trust(dl_top_depth, cfg=cfg)
+        _depth_trust_dl1 = _calc_dl_depth_trust(dl_top_depth, cfg=cfg)
     _dl_consensus_vs_nnue = (dl_top is not None and dl_2_top is not None
                               and dl_top == dl_2_top
                               and nnue_top is not None and dl_top != nnue_top)
-    if _dl_consensus_vs_nnue and _dt_dl1 < 1.0:
-        _dt_dl1 = math.sqrt(_dt_dl1)
-    w_dl1 *= _dt_dl1
+    if _dl_consensus_vs_nnue and _depth_trust_dl1 < 1.0:
+        _depth_trust_dl1 = math.sqrt(_depth_trust_dl1)
+    w_dl1 *= _depth_trust_dl1
 
     _w_dl2_depth_trust = 1.0
     if dl_2_top_depth is not None:
@@ -8663,8 +8915,8 @@ def _council_vote(dl_top, dl_2_top, nnue_top, ply=0,
         w_dl1 *= game_phase_surge_dl_boost
         _dlog(f"[GP-SURGE③] DL weight ×{game_phase_surge_dl_boost:.3f} → w_dl1={w_dl1:.3f}")
 
-    (_disc_dl1, _win_rate_dl_val, _win_rate_nnue_val,
-     _disc_dl2, _win_rate_dl2_val, _win_rate_nnue_for_dl2,
+    (_discount_dl1, _win_rate_dl_val, _win_rate_nnue_val,
+     _discount_dl2, _win_rate_dl2_val, _win_rate_nnue_for_dl2,
      _w_dl2_saturation_guard) = _council_score_discount_core(
         dl_top_score, dl_2_top_score, nnue_score_cp, dl_2_top_depth, cfg, game_phase=game_phase)
     _two_dl_consensus = (
@@ -8673,19 +8925,19 @@ def _council_vote(dl_top, dl_2_top, nnue_top, ply=0,
         and abs(_win_rate_dl_val - _win_rate_dl2_val) < max(0.0, cfg.council_corr_wr_scale)
     )
     if _two_dl_consensus:
-        if _disc_dl1 < 1.0:
-            _disc_dl1 = math.sqrt(_disc_dl1)
-        if _disc_dl2 < 1.0:
-            _disc_dl2 = math.sqrt(_disc_dl2)
-    if _dt_dl1 >= cfg.auftragstaktik_dt_threshold and _disc_dl1 < 1.0:
-        _disc_dl1 = math.sqrt(_disc_dl1)
-    if _disc_dl1 != 1.0:
-        w_dl1 *= _disc_dl1
+        if _discount_dl1 < 1.0:
+            _discount_dl1 = math.sqrt(_discount_dl1)
+        if _discount_dl2 < 1.0:
+            _discount_dl2 = math.sqrt(_discount_dl2)
+    if _depth_trust_dl1 >= cfg.auftragstaktik_dt_threshold and _discount_dl1 < 1.0:
+        _discount_dl1 = math.sqrt(_discount_dl1)
+    if _discount_dl1 != 1.0:
+        w_dl1 *= _discount_dl1
 
     if win_rate_discount_holder is not None:
         try:
-            win_rate_discount_holder.value = (_disc_dl1, _win_rate_dl_val, _win_rate_nnue_val,
-                                        _disc_dl2, _win_rate_dl2_val)
+            win_rate_discount_holder.value = (_discount_dl1, _win_rate_dl_val, _win_rate_nnue_val,
+                                        _discount_dl2, _win_rate_dl2_val)
         except (AttributeError, TypeError):
             pass
 
@@ -8698,8 +8950,8 @@ def _council_vote(dl_top, dl_2_top, nnue_top, ply=0,
                 w_dl2 = dl_2_weight_override * (w_dl2 / _w2e_eff)
             except Exception:
                 w_dl2 = dl_2_weight_override
-        if _disc_dl2 != 1.0:
-            w_dl2 *= _disc_dl2
+        if _discount_dl2 != 1.0:
+            w_dl2 *= _discount_dl2
         if _w_dl2_depth_trust != 1.0:
             w_dl2 *= _w_dl2_depth_trust
             _dlog(f"[COUNCIL-VOTE] DL_2/DL_3 depth_trust ×{_w_dl2_depth_trust:.3f} "
@@ -8730,8 +8982,8 @@ def _council_vote(dl_top, dl_2_top, nnue_top, ply=0,
         _ho_threshold = cfg.game_phase_handover_threshold
         _ho_band = cfg.handover_reverse_hysteresis
         if _ho_band > 1e-9 and game_phase > (_ho_threshold - _ho_band):
-            _ho_t = min(1.0, max(0.0,
-                        (game_phase - (_ho_threshold - _ho_band)) / _ho_band))
+            _ho_t = _clamp(
+                (game_phase - (_ho_threshold - _ho_band)) / _ho_band, 0.0, 1.0)
             _ho_fade = 0.5 * (1.0 + math.cos(math.pi * _ho_t))
             if dl_top is not None:
                 w_dl1 *= _ho_fade
@@ -8765,7 +9017,7 @@ def _council_vote(dl_top, dl_2_top, nnue_top, ply=0,
                   f"(孤立かつ劣勢 nnue_cp={nnue_score_cp} <= {_SEED_DISADV_CP}) "
                   f"— NNUE にフォールバック")
         elif not _seed_backed:
-            _seed_w_cap = max(0.0, min(book_seed_weight, w_nnue * 0.99))
+            _seed_w_cap = _clamp(w_nnue * 0.99, 0.0, book_seed_weight)
             votes[book_seed_move] = votes.get(book_seed_move, 0.0) + _seed_w_cap
             _dlog(f"[BOOK-COUNCIL] seed={book_seed_move} 孤立 → weight clamp "
                   f"{book_seed_weight:.3f}→{_seed_w_cap:.3f} "
@@ -8897,35 +9149,34 @@ def _regime_conviction_raw(confidence, sharpness, council_agree):
     raw = (_REGIME_CONVICTION_RAW_W_CONF * c
          + _REGIME_CONVICTION_RAW_W_CLARITY * clarity
          + _REGIME_CONVICTION_RAW_W_AGREE * agree)
-    return max(0.0, min(1.0, raw))
+    return _clamp01(raw)
 
 
 def _regime_classify(conviction, force_crisis):
     if force_crisis:
-        return "crisis"
+        return _REGIME_CRISIS
     if conviction >= _REGIME_CRUISE_THRESHOLD:
-        return "cruise"
+        return _REGIME_CRUISE
     if conviction <= _REGIME_CRISIS_THRESHOLD:
-        return "crisis"
-    return "alert"
+        return _REGIME_CRISIS
+    return _REGIME_ALERT
 
 
-def _regime_update_ema(gps, confidence, sharpness, council_agree):
+def _regime_update_ema(game_progress, confidence, sharpness, council_agree):
     try:
         raw = _regime_conviction_raw(confidence, sharpness, council_agree)
-        prev = gps.regime_conviction
+        prev = game_progress.regime_conviction
         new = (1.0 - _REGIME_EMA_ALPHA) * prev + _REGIME_EMA_ALPHA * raw
-        gps.regime_conviction_prev = prev
-        gps.regime_conviction = new
+        game_progress.regime_conviction_prev = prev
+        game_progress.regime_conviction = new
         collapse = (prev - new) >= _REGIME_COLLAPSE_THRESHOLD
-        if collapse:
-            gps.regime_force_crisis = True
-        gps.regime_label = _regime_classify(new, gps.regime_force_crisis)
-        gps.regime_force_crisis = False
-        _r = gps.regime_label
-        if _r == "cruise":
+        prev_force = game_progress.regime_force_crisis
+        game_progress.regime_label = _regime_classify(new, prev_force)
+        game_progress.regime_force_crisis = collapse
+        _r = game_progress.regime_label
+        if _r == _REGIME_CRUISE:
             _DLPONDER_STATE["regime_cruise_count"] = int(_DLPONDER_STATE.get("regime_cruise_count", 0)) + 1
-        elif _r == "crisis":
+        elif _r == _REGIME_CRISIS:
             _DLPONDER_STATE["regime_crisis_count"] = int(_DLPONDER_STATE.get("regime_crisis_count", 0)) + 1
         else:
             _DLPONDER_STATE["regime_alert_count"] = int(_DLPONDER_STATE.get("regime_alert_count", 0)) + 1
@@ -8960,7 +9211,7 @@ def _compute_confidence(winner, dl_top, dl_2_top, nnue_top, nnue_score_cp,
     else:
         dl_certainty = 0.5
     if time_aggression_ratio is not None and time_aggression_ratio > 0:
-        ease = max(0.0, min(1.0, 1.5 - time_aggression_ratio))
+        ease = _clamp01(1.5 - time_aggression_ratio)
     else:
         cp = abs(nnue_score_cp or 0)
         ease = abs(2.0 * _cp_to_winrate(cp, _CSM_WR_SLOPE) - 1.0)
@@ -9006,19 +9257,19 @@ def _compute_momentum(*, score_cp=None, prev_score_cp=None,
                        council_agree_streak=0,
                        tesuki_n=None):
     if score_cp is not None and prev_score_cp is not None:
-        score_trend = max(-1.0, min(1.0, (score_cp - prev_score_cp) / 200.0))
+        score_trend = _clamp((score_cp - prev_score_cp) / 200.0, -1.0, 1.0)
     else:
         score_trend = 0.0
     if game_phase is not None and prev_game_phase is not None:
         gp_delta = game_phase - prev_game_phase
-        gp_push = max(-1.0, min(1.0, gp_delta * 5.0))
+        gp_push = _clamp(gp_delta * 5.0, -1.0, 1.0)
     else:
         gp_push = 0.0
-    streak_calm = max(-1.0, min(1.0, (council_agree_streak - 2.5) / 2.5))
+    streak_calm = _clamp((council_agree_streak - 2.5) / 2.5, -1.0, 1.0)
     base = 0.45 * score_trend + 0.35 * gp_push + 0.20 * streak_calm
     if tesuki_n is not None and tesuki_n <= 2:
         base -= max(0.0, 1.0 - tesuki_n / 3.0)
-    return max(-1.0, min(1.0, base))
+    return _clamp(base, -1.0, 1.0)
 
 
 _CSM_INHERIT = object()
@@ -9043,21 +9294,22 @@ def _apply_csm_and_regime(ctx, nnue_info, final_move, *,
             nnue_score_cp=nnue_score_cp,
             score_gap_dl_nnue=score_gap_dl_nnue)
         nnue_info["momentum"] = _compute_momentum(
-            score_cp=nnue_score_cp, prev_score_cp=ctx.gps.last_nnue_score_cp,
-            game_phase=game_phase, prev_game_phase=ctx.gps.last_game_phase,
-            council_agree_streak=ctx.gps.council_agree_streak,
-            tesuki_n=ctx.gps.last_tesuki_n)
-        ctx.gps.last_momentum = nnue_info["momentum"]
-        ctx.gps.last_sharpness = nnue_info["sharpness"]
+            score_cp=nnue_score_cp, prev_score_cp=ctx.game_progress.last_nnue_score_cp,
+            game_phase=game_phase, prev_game_phase=ctx.game_progress.last_game_phase,
+            council_agree_streak=ctx.game_progress.council_agree_streak,
+            tesuki_n=ctx.game_progress.last_tesuki_n)
+        ctx.game_progress.last_momentum = nnue_info["momentum"]
+        ctx.game_progress.last_sharpness = nnue_info["sharpness"]
         if regime_voices is not None:
             _regime_agree = bool(all(v for v in regime_voices)
                                 and len(set(regime_voices)) == 1)
             _regime_collapse = _regime_update_ema(
-                ctx.gps, nnue_info.get("confidence"),
+                ctx.game_progress, nnue_info.get("confidence"),
                 nnue_info.get("sharpness"), _regime_agree)
-            nnue_info["regime_conviction"] = ctx.gps.regime_conviction
-            nnue_info["regime_label"]     = ctx.gps.regime_label
+            nnue_info["regime_conviction"] = ctx.game_progress.regime_conviction
+            nnue_info["regime_label"]     = ctx.game_progress.regime_label
             nnue_info["regime_collapse"]   = _regime_collapse
+            nnue_info["regime_force_crisis"] = ctx.game_progress.regime_force_crisis
     except Exception as _met_e:
         _flog(f"[METRICS-{label}] compute failed: {_met_e!r}")
 
@@ -9095,7 +9347,8 @@ def _run_dl_1_search(dl_1, position_cmd, n, nodes, timeout,
         dl_1._last_multipv_sent = n
 
     dl_1.send(position_cmd)
-    dl_1.send(f"go nodes {int(nodes)}")
+    nodes = _dyn_dl_nodes(int(nodes))
+    dl_1.send(f"go nodes {nodes}")
 
     moves_scores  = {}
     pv_lines      = {}
@@ -9111,7 +9364,7 @@ def _run_dl_1_search(dl_1, position_cmd, n, nodes, timeout,
         _search_timeout = min(_search_timeout, movetime_ms / 1000.0 + 0.5)
     _wall_start = time.perf_counter()
     _lp_last_emit = 0.0
-    for line in dl_1.read_until("bestmove", timeout=_search_timeout):
+    for line in dl_1.iter_until("bestmove", timeout=_search_timeout):
         if "bestmove" in line:
             _got_bestmove = True
         mm = _RE_MATE.search(line)
@@ -9149,7 +9402,7 @@ def _run_dl_1_search(dl_1, position_cmd, n, nodes, timeout,
         if sm:
             score = int(sm.group(1))
         if mm:
-            score = 30000 if int(mm.group(1)) > 0 else -30000
+            score = _mate_sign_score(int(mm.group(1)))
 
         if collect_extended:
             pv_m = _RE_PV_FULL.search(line)
@@ -9215,7 +9468,7 @@ def _run_dl_3_search(dl_3, position_cmd, n, movetime_ms, timeout,
 
     _DRAIN_ALLOWANCE_S = min(2.0, eff_s * 0.2) if eff_s is not None else 2.0
 
-    for line in dl_3.read_until("bestmove", timeout=timeout):
+    for line in dl_3.iter_until("bestmove", timeout=timeout):
         if "bestmove" in line:
             _got_bestmove = True
 
@@ -9232,7 +9485,7 @@ def _run_dl_3_search(dl_3, position_cmd, n, movetime_ms, timeout,
         if sm:
             score = int(sm.group(1))
         if mm:
-            score = 30000 if int(mm.group(1)) > 0 else -30000
+            score = _mate_sign_score(int(mm.group(1)))
 
         if collect_extended:
             pv_m = _RE_PV_FULL.search(line)
@@ -9274,8 +9527,8 @@ def _prefetch_flush(dl_1, label="dl_1", eff_s=None):
     if not dl_1._alive:
         return 0
     if eff_s is not None and eff_s > 0:
-        _dl_budget_s = eff_s * _tdg.dl_time_ratio
-        timeout = max(0.05, min(0.2, _dl_budget_s * 0.5))
+        _dl_budget_s = eff_s * _time_dyn.dl_time_ratio
+        timeout = _clamp(_dl_budget_s * 0.5, 0.05, 0.2)
     else:
         timeout = 0.2
 
@@ -9347,7 +9600,7 @@ def fetch_dl_policy(dl_1, position_cmd, n, nodes, timeout=60.0, gap_min=None, ef
 
     _timeout_limit_s = timeout * 0.8
     if eff_s is not None and eff_s > 0:
-        _dl_budget_s   = eff_s * _tdg.dl_time_ratio
+        _dl_budget_s   = eff_s * _time_dyn.dl_time_ratio
         _flush_limit_s = min(_dl_budget_s * 0.8, _timeout_limit_s)
     else:
         _flush_limit_s = _timeout_limit_s
@@ -9356,7 +9609,7 @@ def fetch_dl_policy(dl_1, position_cmd, n, nodes, timeout=60.0, gap_min=None, ef
             "[PRE-FLUSH] elapsed=%.3fs >= limit=%.3fs (dl_budget=%s timeout=%.3fs) "
             "— skipping DL fetch (nnue-only fallback)"
             % (_flush_elapsed, _flush_limit_s,
-               ("%.3fs" % (eff_s * _tdg.dl_time_ratio)) if (eff_s and eff_s > 0) else "N/A",
+               ("%.3fs" % (eff_s * _time_dyn.dl_time_ratio)) if (eff_s and eff_s > 0) else "N/A",
                timeout)
         )
         return None
@@ -9513,10 +9766,9 @@ def _lc_dispatch_core(is_infinite, endgame_mode, dl1_alive,
 
 
 def _lc_dl3_timeout_s_core(eff_s, time_aggression_ratio, cfg):
-    return max(0.05, min(
-        cfg.light_council_dl3_timeout_s,
+    return _clamp(
         eff_s * cfg.light_council_dl3_timeout_per_s / 1000.0 * time_aggression_ratio,
-    ))
+        0.05, cfg.light_council_dl3_timeout_s)
 
 
 def _lc_proxy_gate_core(proxy_enable, nnue_top_vote, dl3_alive,
@@ -9569,9 +9821,13 @@ def _pv_overlap_count(pv_lines, top_move, n_top=3):
 _RE_USI_MOVE_STRICT = re.compile(r"\d[a-z]\d[a-z]\+?|[A-Z]\*\d[a-z]")
 
 
-def _multi_ponder_alt_reply(pv_lines, our_move, primary_reply):
+def _multi_ponder_alt_reply(pv_lines, our_move, primary_reply, policy=None, alt_min_gap=0.0):
     if not pv_lines or not our_move or not primary_reply:
         return None
+    if alt_min_gap > 0.0 and policy and len(policy) >= 2:
+        _g = (policy[0][1] or 0) - (policy[1][1] or 0)
+        if _g > alt_min_gap:
+            return None
     pv = pv_lines.get(our_move)
     if pv and len(pv) >= 2 and pv[1] and pv[1] != primary_reply:
         if _RE_USI_MOVE_STRICT.fullmatch(pv[1]):
@@ -9659,16 +9915,29 @@ class Prefetcher:
             self._dl_1   = dl_1
             self._dl_2_ref = dl_2 if (dl_2 is not None and dl_2_lock is not None) else None
             self._dl_3_result = None
-            self._dl_3_ref    = dl_3 if (dl_3 is not None and dl_3._alive) else None
+            self._dl_3_ref    = dl_3 if _eng_alive(dl_3) else None
             self._dl_3_shared_lock = dl_3_lock
             self._generation += 1
             my_gen = self._generation
-        _ptimeout = timeout if timeout is not None else (_tdg.dl_time_fallback_ms / 1000.0)
+        _ptimeout = timeout if timeout is not None else (_time_dyn.dl_time_fallback_ms / 1000.0)
 
         _opponent_turn_pos = dl_2_opponent_turn_pos
         _top_n        = max(1, int(prefetch_top_n))
 
         def _run():
+            def _dl1_fetch_repack(pos, fetch_nodes, counter_key):
+                raw = fetch_dl_policy(
+                    dl_1, pos, n, fetch_nodes,
+                    timeout=_ptimeout, gap_min=None
+                )
+                if raw is None:
+                    _DLPONDER_STATE[counter_key] = int(_DLPONDER_STATE.get(counter_key, 0)) + 1
+                    _flog(f"[ignored] prefetch _run: {counter_key} fetch returned None "
+                          f"(cumulative={_DLPONDER_STATE[counter_key]})")
+                    return None
+                pol, mt, gp, _pv, dp, hs = raw
+                return (pol, mt, gp, dp, hs)
+
             _dlog(f"Prefetch started: {position_cmd[:80]}")
             with self.dl_1_lock:
                 with self._lock:
@@ -9683,7 +9952,7 @@ class Prefetcher:
                 if self._generation == my_gen and self._pos == position_cmd:
                     self._result = r
                     self._src    = "prefetch"
-                    _dlog(f"Prefetch done: moves={[mv for mv,_ in policy]} mate={mate} gap={_gap}")
+                    _dlog(f"Prefetch done: moves={[mv for mv,_ in policy]} mate={mate} gap={r[2]}")
 
 
             if _dl_prefetch_idp_nodes > nodes and policy:
@@ -9710,19 +9979,6 @@ class Prefetcher:
 
             dl_2_positions_ordered = [position_cmd]
 
-            def _dl1_fetch_repack(pos, fetch_nodes, counter_key):
-                raw = fetch_dl_policy(
-                    dl_1, pos, n, fetch_nodes,
-                    timeout=_ptimeout, gap_min=None
-                )
-                if raw is None:
-                    _DLPONDER_STATE[counter_key] = int(_DLPONDER_STATE.get(counter_key, 0)) + 1
-                    _flog(f"[ignored] prefetch _run: {counter_key} fetch returned None "
-                          f"(cumulative={_DLPONDER_STATE[counter_key]})")
-                    return None
-                pol, mt, gp, _pv, dp, hs = raw
-                return (pol, mt, gp, dp, hs)
-
             def _do_dl_2_prefetch(pos):
                 with self._lock:
                     if self._generation != my_gen:
@@ -9737,7 +9993,7 @@ class Prefetcher:
                     with self._lock:
                         if self._generation != my_gen:
                             return False
-                    _flush_timeout = min(_tdg.dl_2_time_max_ms / 1000.0 + 6.0, 30.0)
+                    _flush_timeout = min(_time_dyn.dl_2_time_max_ms / 1000.0 + 6.0, 30.0)
                     _drain_ok = dl_2.flush_with_stop(timeout=_flush_timeout)
                     if not _drain_ok:
                         _dlog("DL_2 prefetch: flush_until_ready timeout — skipping")
@@ -9748,7 +10004,7 @@ class Prefetcher:
                     _d2_raw = fetch_dl_policy(
                         dl_2, pos, 1,
                         _dl_2_node_budget(_time_aggression_dyn_ratio(
-                            _tdg.time_aggression_dl_dyn, _time_aggression_base, hi=1.2)),
+                            _time_dyn.time_aggression_dl_dyn, _time_aggression_base, hi=1.2)),
                         timeout=_ptimeout, gap_min=None
                     )
                     if _d2_raw is not None:
@@ -9830,13 +10086,13 @@ class Prefetcher:
                 if _ranked and len(_ranked) >= 2:
                     _voi_scores = [sc for _, sc in _ranked[:_top_n]]
                     _voi_norm = float(_cfg.get("Voi_Norm_Cp", 600)) or 600.0
-                    _pf_max_voi = min(1.0, max(0.0, (max(_voi_scores) - min(_voi_scores)) / _voi_norm))
+                    _pf_max_voi = _clamp((max(_voi_scores) - min(_voi_scores)) / _voi_norm, 0.0, 1.0)
                 else:
                     _pf_max_voi = 0.0
             except Exception:
                 _pf_max_voi = 0.0
             _cfg_park_nodes = int(
-                _params.get("POLICY_NODES", 2000)
+                _params["POLICY_NODES"]
             )
             _park_nodes = _root_park_budget_core(
                 _cfg_park_nodes, _pf_max_voi,
@@ -9847,7 +10103,7 @@ class Prefetcher:
             _ok_park = _do_dl_2_prefetch(_opponent_turn_pos)
             _dlog(f"[ROOT-PARK] DL_2 tree parked at opponent-turn root (ok={_ok_park})")
 
-            if dl_3 is not None and dl_3._alive:
+            if _eng_alive(dl_3):
                 def _dl_3_run():
                     with self._lock:
                         if self._generation != my_gen:
@@ -9943,14 +10199,14 @@ class Prefetcher:
             f2k = self._dl_2_ref
             f3k = self._dl_3_ref
             self._dl_3_ref = None
-        if fk is not None and fk._alive:
+        if _eng_alive(fk):
             fk.send("stop")
-        if f2k is not None and f2k._alive:
+        if _eng_alive(f2k):
             try:
                 f2k.send("stop")
             except Exception as _fe:
                 _flog(f"[ignored] {__file__}:4010: {_fe}")
-        if f3k is not None and f3k._alive:
+        if _eng_alive(f3k):
             try:
                 f3k.send("stop")
             except Exception as _fe:
@@ -10041,7 +10297,7 @@ def _make_dl1_multipv_cb(ctx, pos):
         else:
             _mm = _RE_MATE.search(ln)
             if _mm:
-                _sc = 30000 if int(_mm.group(1)) > 0 else -30000
+                _sc = _mate_sign_score(int(_mm.group(1)))
         _dm = _RE_DEPTH.search(ln)
         _dep = int(_dm.group(1)) if _dm else 0
         _prev = _scores.get(_root)
@@ -10064,53 +10320,7 @@ def _make_dl1_multipv_cb(ctx, pos):
 
 
 def _endgame_dl3_display_fetch(ctx, eff_s):
-    if not _cfg_bool("Endgame_DL3_MultiPV_Display", True):
-        return
-    if ctx.dl_3 is not None and ctx.dl_3._alive:
-        _eng, _lock = ctx.dl_3, ctx.dl_3_lock
-    elif (ctx.dl_2 is not None and ctx.dl_2._alive
-            and ctx.dl_2_lock is not None):
-        _eng, _lock = ctx.dl_2, ctx.dl_2_lock
-    else:
-        return
-    _pos = ctx.current_position
-    _eff = eff_s if (eff_s and eff_s > 0) else 2.0
-
-    def _run():
-        if not _lock.acquire(blocking=False):
-            _dlog("[EG-DL3-MULTIPV] %s lock busy — display fetch skipped" % _eng.name)
-            return
-        try:
-            _eng._live_info_cb = _make_dl1_multipv_cb(ctx, _pos)
-            try:
-                _n = max(2, int(_cfg.get("Endgame_DL3_MultiPV_N", 5)))
-            except Exception:
-                _n = 5
-            _to = max(0.4, min(2.5, _eff * 0.35))
-            _r = fetch_dl_policy(_eng, _pos, _n, _dl_3_effective_nodes,
-                                 timeout=_to, eff_s=_eff, use_dl3=True)
-            if _r and _r[0]:
-                if _LIVE._ready() and ctx.current_position == _pos:
-                    try:
-                        _LIVE.update_think_pv(policy=_r[0], pos=_pos)
-                    except Exception:
-                        pass
-                try:
-                    print("info string dl_live_policy "
-                          + json.dumps([(m, round(float(sc), 4))
-                                        for m, sc in _r[0][:10]]), flush=True)
-                except Exception:
-                    pass
-        except Exception as _e:
-            _dlog(f"[EG-DL3-MULTIPV] display fetch failed: {_e!r}")
-        finally:
-            try:
-                _eng._live_info_cb = None
-            except Exception:
-                pass
-            _lock.release()
-
-    threading.Thread(target=_run, daemon=True, name="eg-dl3-multipv").start()
+    pass
 
 
 def _make_live_think_cb(ctx, handler, position, *, mode=None,
@@ -10130,7 +10340,7 @@ def relay_until_bestmove(eng, timeout=120, intercept_bestmove=False,
                           partial_pv_depth_holder=None, pv_head_event=None,
                           remaining_ms=None, floor_ms=None,
                           kill_on_empty=True, go_clock=None,
-                          live_info_cb=None):
+                          live_info_cb=None, pv_head_lock=None):
     if go_clock is not None:
         if eff_s is None:
             eff_s = go_clock.eff_s
@@ -10142,10 +10352,10 @@ def relay_until_bestmove(eng, timeout=120, intercept_bestmove=False,
     if eff_s is not None and eff_s > 0:
         _sm_opts = slow_mover_opts if slow_mover_opts is not None else _nnue_1_opts
         _slow_mover_val = float(_sm_opts.get("SlowMover", "146"))
-        _relay_factor = min(1.25, max(1.05, _slow_mover_val / 200.0 * 1.25))
+        _relay_factor = _clamp(_slow_mover_val / 200.0 * 1.25, 1.05, 1.25)
         _relay_cap = eff_s * _relay_factor
         _relay_binding_layer = "eff_s*factor"
-        _relay_min_floor = max(_move_overhead_s, min(eff_s, 2.0 * _move_overhead_s))
+        _relay_min_floor = _clamp(2.0 * _move_overhead_s, _move_overhead_s, eff_s)
         if _relay_cap < _relay_min_floor:
             _relay_cap = _relay_min_floor
             _relay_binding_layer = "MO_floor"
@@ -10205,7 +10415,7 @@ def relay_until_bestmove(eng, timeout=120, intercept_bestmove=False,
         _remaining = _deadline - time.perf_counter()
         if _remaining <= 0:
             _flog(
-                f"relay_until_bestmove: TIMEOUT"
+                "relay_until_bestmove: TIMEOUT"
                 + _ctx(
                     f"  intercept={intercept_bestmove}"
                     f"  alive={eng._alive}"
@@ -10227,7 +10437,7 @@ def relay_until_bestmove(eng, timeout=120, intercept_bestmove=False,
                     _rem_after_main_s = (
                         remaining_ms - _elapsed_main_ms
                     ) / 1000.0 - _move_overhead_s
-                    _stop_window = max(0.3, min(5.0, _rem_after_main_s))
+                    _stop_window = _clamp(_rem_after_main_s, 0.3, 5.0)
                     if _stop_window < 5.0:
                         _flog(
                             f"relay_until_bestmove: stop window scaled by remaining: "
@@ -10238,7 +10448,7 @@ def relay_until_bestmove(eng, timeout=120, intercept_bestmove=False,
                         and floor_ms is not None and floor_ms > 0):
                     _elapsed_main_ms = (time.perf_counter() - _t_start) * 1000.0
                     _rem_after_main_s = (floor_ms - _elapsed_main_ms) / 1000.0
-                    _stop_window = max(0.3, min(5.0, _rem_after_main_s))
+                    _stop_window = _clamp(_rem_after_main_s, 0.3, 5.0)
                     if _stop_window < 5.0:
                         _flog(
                             f"relay_until_bestmove: stop window scaled by inc (remaining=0): "
@@ -10256,7 +10466,7 @@ def relay_until_bestmove(eng, timeout=120, intercept_bestmove=False,
                     if not _stop_out:
                         continue
                     _lines_read += 1
-                    if _stop_out.startswith("info") and "depth" in _stop_out and "score" in _stop_out:
+                    if _is_scored_info(_stop_out):
                         nnue_info["scored_info_seen"] = True
                         dm2 = _RE_DEPTH.search(_stop_out)
                         d2 = int(dm2.group(1)) if dm2 else 0
@@ -10268,7 +10478,7 @@ def relay_until_bestmove(eng, timeout=120, intercept_bestmove=False,
                             else:
                                 mm2 = _RE_MATE.search(_stop_out)
                                 if mm2:
-                                    nnue_info["score_cp"] = 30000 if int(mm2.group(1)) > 0 else -30000
+                                    nnue_info["score_cp"] = _mate_sign_score(int(mm2.group(1)))
                                     nnue_info["mate_ply"] = int(mm2.group(1))
                             nnue_info["depth"] = d2
                             if full_pv_holder is not None and " pv " in _stop_out:
@@ -10311,7 +10521,7 @@ def relay_until_bestmove(eng, timeout=120, intercept_bestmove=False,
                           f"{eng.name} は生存。kill せず空で返す "
                           f"(SP ponderhit idle とみなし呼び出し側で再探索)")
                     break
-                _probe_to = max(_move_overhead_s, min(2.0 * _move_overhead_s, _stop_window))
+                _probe_to = _clamp(_stop_window, _move_overhead_s, 2.0 * _move_overhead_s)
                 if eng._alive and eng.flush_until_ready(timeout=_probe_to, max_stale_lines=200):
                     if timeout is not None and timeout >= 2.0:
                         eng._empty_relay_streak = getattr(eng, "_empty_relay_streak", 0) + 1
@@ -10359,7 +10569,7 @@ def relay_until_bestmove(eng, timeout=120, intercept_bestmove=False,
         _now = time.perf_counter()
         if _now - _last_hb >= _HB_INTERVAL:
             _flog(
-                f"relay_until_bestmove: waiting"
+                "relay_until_bestmove: waiting"
                 + _ctx(
                     f"  remaining={_remaining:.1f}s"
                     f"  intercept={intercept_bestmove}"
@@ -10377,7 +10587,7 @@ def relay_until_bestmove(eng, timeout=120, intercept_bestmove=False,
             continue
         _lines_read += 1
 
-        if out.startswith("info") and "depth" in out and "score" in out:
+        if _is_scored_info(out):
             nnue_info["scored_info_seen"] = True
             dm = _RE_DEPTH.search(out)
             d  = int(dm.group(1)) if dm else 0
@@ -10390,7 +10600,7 @@ def relay_until_bestmove(eng, timeout=120, intercept_bestmove=False,
                 mm = _RE_MATE.search(out)
                 if mm:
                     _cur_mate_ply = int(mm.group(1))
-                    _cur_score = 30000 if _cur_mate_ply > 0 else -30000
+                    _cur_score = _mate_sign_score(_cur_mate_ply)
             if d > _best_depth:
                 _best_depth = d
                 nnue_info["score_cp"] = _cur_score
@@ -10431,10 +10641,15 @@ def relay_until_bestmove(eng, timeout=120, intercept_bestmove=False,
                     partial_pv_holder[0] = _pv_head_move
                 if partial_pv_depth_holder is not None:
                     _dm = _RE_DEPTH.search(out)
-                    partial_pv_depth_holder[0] = (
+                    _depth_tuple = (
                         _pv_head_move,
                         int(_dm.group(1)) if _dm else 0,
                     )
+                    if pv_head_lock is not None:
+                        with pv_head_lock:
+                            partial_pv_depth_holder[0] = _depth_tuple
+                    else:
+                        partial_pv_depth_holder[0] = _depth_tuple
                 if pv_head_event is not None:
                     pv_head_event.set()
 
@@ -10449,7 +10664,7 @@ def relay_until_bestmove(eng, timeout=120, intercept_bestmove=False,
                 nnue_info["ponder"] = pm.group(1)
             eng._empty_relay_streak = 0
             _flog(
-                f"relay_until_bestmove: bestmove received"
+                "relay_until_bestmove: bestmove received"
                 + _ctx(
                     f"  bestmove={nnue_info['bestmove']!r}"
                     f"  intercept={intercept_bestmove}"
@@ -10490,7 +10705,7 @@ def _decided_thresholds(side):
     return 0, -150
 
 
-def _game_blunder_records_core(game_log, swing_floor_cp, score_cap=29000):
+def _game_blunder_records_core(game_log, swing_floor_cp, score_cap=_MATE_SCORE_CP):
     if swing_floor_cp is None or swing_floor_cp <= 0 or not game_log:
         return []
 
@@ -10517,8 +10732,7 @@ def _game_blunder_records_core(game_log, swing_floor_cp, score_cap=29000):
         return "blind", None
 
     records = []
-    for i in range(len(game_log) - 1):
-        ri, rj = game_log[i], game_log[i + 1]
+    for i, (ri, rj) in enumerate(zip(game_log, game_log[1:])):
         if ri.get("decided"):
             continue
         sc_i, sc_j = _num(ri.get("nnue_score_cp")), _num(rj.get("nnue_score_cp"))
@@ -10667,6 +10881,8 @@ def _build_stats_record_core(game_log, game_meta, moves_out, formula_out,
         "endgame_triggered": game_meta.get("endgame_triggered", False),
         "result":        game_meta.get("result", "unknown"),
         "blunders":      blunders,
+        "book_pass_killed": game_meta.get("book_pass_killed", False),
+        "book_pass_evaporated": game_meta.get("book_pass_evaporated", False),
         "formula": formula_out,
         "moves":         moves_out,
     }
@@ -10695,7 +10911,7 @@ def _write_game_stats(game_log, game_meta, cfg=None):
 
     try:
         formula_full = {
-                "version":             "v6.5",
+                "version":             "v6.7",
 
                 "spsa_config_loaded": os.path.exists(_SPSA_CONFIG_PATH),
                 "GP_Handover_Threshold": cfg.game_phase_handover_threshold,
@@ -10707,7 +10923,7 @@ def _write_game_stats(game_log, game_meta, cfg=None):
                 "DL_Score_Gap_Min_Min":     _dl_gap_min_min,
                 "DL_Score_Gap_Min_Max":     _dl_gap_min_max,
                 "DL_2_Time_Margin_Ratio":   cfg.dl_2_margin_ratio,
-                "DL_2_Time_Margin_Min_ms":  _tdg.dl_2_margin_min_ms,
+                "DL_2_Time_Margin_Min_ms":  _time_dyn.dl_2_margin_min_ms,
                 "DL_2_Time_Margin_Max_ms":  cfg.dl_2_margin_max_ms,
                 "DL_2_Latency_Per_MB_s":    cfg.dl_2_latency_per_mb_s,
                 "DL_2_Cold_Launch_Latency_Factor": cfg.dl_2_cold_launch_latency_factor,
@@ -10724,12 +10940,12 @@ def _write_game_stats(game_log, game_meta, cfg=None):
                 "DL_1_Hash":     "n/a",
                 "DL_2_Hash":     "n/a",
                 "DL_3_Hash":     "n/a",
-                "DL_Time_Ratio":           _tdg.dl_time_ratio,
-                "DL_Time_Max_ms":          _tdg.dl_time_max_ms,
+                "DL_Time_Ratio":           _time_dyn.dl_time_ratio,
+                "DL_Time_Max_ms":          _time_dyn.dl_time_max_ms,
                 "DL_Time_Min_ms":          _dl_time_min_ms,
                 "DL_Time_Min_Eff_S_Cap_Ratio": _dl_time_min_eff_s_cap_ratio,
                 "nnue_1_SlowMover":        int(_nnue_1_opts.get("SlowMover", 150)),
-                "time_aggression":         _tdg.time_aggression,
+                "time_aggression":         _time_dyn.time_aggression,
                 "DL_Stability_Threshold_Base":    _dl_stab_base,
                 "DL_Stability_Threshold_Per_Sec": _dl_stab_per_sec,
                 "DL_Stability_Threshold_Min":     _dl_stab_min,
@@ -10750,14 +10966,13 @@ def _write_game_stats(game_log, game_meta, cfg=None):
                 "SlowMover_Per_Sec":       cfg.slow_mover_per_sec,
                 "SlowMover_Min":           cfg.slow_mover_min,
                 "SlowMover_Max":           cfg.slow_mover_max,
-                "nnue_slowmover_user_set": _nnue_slowmover_user_set,
-                "nnue_2_slowmover_user_set": _nnue_2_slowmover_user_set,
+                "nnue_slowmover_user_set": cfg.nnue_slowmover_user_set,
+                "nnue_2_slowmover_user_set": cfg.nnue_2_slowmover_user_set,
                 "DL_2_Prefetch_Enable": cfg.dl_2_prefetch_enable,
                 "DL_Prefetch_IDP_Nodes": _dl_prefetch_idp_nodes,
                 "DL_Prefetch_DL2_Median_Ms": int(cfg.dl_prefetch_dl2_median_s * 1000),
                 "DL_Prefetch_DL1_Est_Ms":    int(cfg.dl_prefetch_dl1_est_s * 1000),
                 "POLICY_NODES_Per_Eff_S": cfg.policy_nodes_per_eff_s,
-                "DL3_Council_Weight": cfg.dl_3_council_weight,
                 "DL3_Proxy_Enable": cfg.dl3_proxy_enable,
                 "DL3_Proxy_Scope": _dl3_proxy_scope,
                 "DL3_Proxy_Mode": cfg.dl3_proxy_mode,
@@ -10769,8 +10984,8 @@ def _write_game_stats(game_log, game_meta, cfg=None):
                 "DL3_Proxy_PV_Min_Depth": cfg.dl3_proxy_pv_min_depth,
                 "DL_3_Enable": _dl_3_enable,
                 "DL_3_Rescue_CP_Threshold": cfg.dl_3_rescue_cp_threshold,
-                "DL_3_Rescue_Eff_S_Min": _tdg.dl_3_rescue_eff_s_min,
-                "DL_3_Empty_Eff_S_Min": _tdg.dl_3_empty_eff_s_min,
+                "DL_3_Rescue_Eff_S_Min": _time_dyn.dl_3_rescue_eff_s_min,
+                "DL_3_Empty_Eff_S_Min": _time_dyn.dl_3_empty_eff_s_min,
                 "DL_3_Nodes": _dl_3_effective_nodes,
                 "DL3_model_mb": _model_size_mb(_dl_3_path, cfg.dl_3_dnn_model1) if _dl_3_enable else None,
                 "Move_Overhead_Ms": _move_overhead_ms,
@@ -10804,6 +11019,10 @@ def _write_game_stats(game_log, game_meta, cfg=None):
                 "Disagree_Eff_S_Boost_Score1":        cfg.disagree_eff_s_boost_score1,
                 "Disagree_Eff_S_Boost_Score2":        cfg.disagree_eff_s_boost_score2,
                 "Disagree_Score_Gap_Threshold_Cp":    float(cfg.disagree_score_gap_threshold_cp),
+                "Regime_EMA_Alpha":                    _REGIME_EMA_ALPHA,
+                "Regime_Cruise_Threshold":             _REGIME_CRUISE_THRESHOLD,
+                "Regime_Crisis_Threshold":             _REGIME_CRISIS_THRESHOLD,
+                "Regime_Collapse_Threshold":           _REGIME_COLLAPSE_THRESHOLD,
                 "Disagree_Emergency_Gp_Min":          cfg.disagree_emergency_game_phase_min,
                 "Disagree_Emergency_Score_Gap_Cp":    float(cfg.disagree_emergency_score_gap_cp),
                 "Disagree_Emergency_Eff_S_Boost":     cfg.disagree_emergency_eff_s_boost,
@@ -10821,6 +11040,7 @@ def _write_game_stats(game_log, game_meta, cfg=None):
                 "Council_Nyugyoku_DL_Restore":        cfg.council_nyugyoku_dl_restore,
                 "MaxMin_Tie_Margin":                  cfg.maxmin_tie_margin,
                 "Multi_Ponder_Enable":                int(_multi_ponder_enable),
+                "SMP_Alt_Min_Gap":                    float(_cfg.get("SMP_Alt_Min_Gap", 0.0)),
                 "Score_Stability_Swing_Threshold_Cp": float(cfg.score_stability_swing_threshold_cp),
                 "Score_Stability_Eff_S_Boost":        cfg.score_stability_eff_s_boost,
                 "Score_Stability_GP_Scale_Min":        cfg.score_stability_game_phase_scale_min,
@@ -10846,7 +11066,7 @@ def _write_game_stats(game_log, game_meta, cfg=None):
                 "Time_Score_Start_Cp":             cfg.time_aggression_score_start_cp,
                 "Time_Score_Span_Cp":              cfg.time_aggression_score_span_cp,
                 "Time_Score_Floor":                cfg.time_aggression_score_floor,
-                "POLICY_NODES":                    float(_params.get("POLICY_NODES", 2000)),
+                "POLICY_NODES":                    float(_params["POLICY_NODES"]),
                 "DL_2_Node_Ratio":                 _dl_2_node_ratio,
                 "Time_Aggression_DL":              _time_aggression_dl,
                 "Time_Aggression_NNUE":            _time_aggression_nnue,
@@ -10886,6 +11106,7 @@ def _write_game_stats(game_log, game_meta, cfg=None):
                 "GP_Surge_Eff_S_Boost":            float(_cfg.get("GP_Surge_Eff_S_Boost", 1.3129)),
                 "GP_Surge_DL_Weight_Boost":        float(_cfg.get("GP_Surge_DL_Weight_Boost", 1.0574)),
                 "GP_Surge_DL2_Timeout_Boost":      float(_cfg.get("GP_Surge_DL2_Timeout_Boost", 1.1744)),
+                "dlp": game_meta.get("dlp_diff", {}),
         }
 
         formula_out = _formula_slim_filter_core(formula_full, _SPSA_MODE)
@@ -10929,12 +11150,13 @@ def _write_game_stats(game_log, game_meta, cfg=None):
         except Exception as _fe:
             _flog(f"[ignored] {__file__}:4565: {_fe}")
 _shutdown_done        = [False]
+_shutdown_lock        = threading.Lock()
 
 def _init_engine_context() -> "EngineContext":
     global _dl_3_effective_nodes
     _flog("=" * 50)
     _flog(f"Engine start  argv={sys.argv}")
-    _flog(f"frozen={getattr(sys, 'frozen', False)}  base={_get_base_dir()}")
+    _flog(f"frozen={getattr(sys, 'frozen', False)}  base={_BASE_DIR}")
     _flog(f"Move_Overhead={_move_overhead_ms}ms")
     _eng_cfg = EngineConfig.from_cfg(_cfg)
     _eng_cfg.dl_time_ratio_user_set    = _dl_time_ratio_user_set
@@ -10949,9 +11171,9 @@ def _init_engine_context() -> "EngineContext":
     _eng_cfg.dl_2_time_max_user_set    = ("DL_2_Time_Max_ms"    in _user_cfg_keys)
     _flog(
         f"Dynamic thresholds: handover/gap_min/stab/slow_mover/dl_budget — see §11. "
-        f"Time_Aggression={_tdg.time_aggression} DL_2_Enable={_dl_2_enable} "
+        f"Time_Aggression={_time_dyn.time_aggression} DL_2_Enable={_dl_2_enable} "
         f"Council_Phase={_council_phase_enable} Light_Council={_eng_cfg.light_council_enable} "
-        f"Consensus_Skip={_consensus_skip_enable}"
+        "Consensus_Skip=True"
     )
     _flog(
         f"Engine paths: DL_1={DL_1_PATH}  nnue_1={nnue_1_PATH}  "
@@ -11075,6 +11297,7 @@ def main():
                 pass
     threading.Thread(target=_wedge_watchdog, daemon=True,
                      name="wedge-wd").start()
+    global _GO_EMITTED
     while True:
         try:
             raw = sys.stdin.readline()
@@ -11093,6 +11316,8 @@ def main():
                 _flog("[GAME] 'stop' received on stdin — will stop after current game")
                 _csa_stop_event.set()
                 continue
+            if line.split()[0] in ("go", "ponderhit", "stop"):
+                _GO_EMITTED = False
             if line.split()[0] in _WEDGE_CMDS:
                 _WEDGE_HB["ts"] = time.monotonic()
                 _WEDGE_HB["line"] = line[:120]
@@ -11105,6 +11330,28 @@ def main():
                 _dispatch(ctx, line)
         except Exception as e:
             _flog(f"Main loop error: {e}\n{_safe_format_exc()}")
+            try:
+                _g_tok = line.split()[0] if line.split() else ""
+                if (_g_tok in ("go", "ponderhit", "stop")
+                        and not _GO_EMITTED
+                        and not line.startswith("go infinite")):
+                    _g_emerg = ""
+                    try:
+                        _g_emerg = (_emergency_move_from_any_engine(ctx, 3.0)
+                                    or "").strip()
+                    except Exception as _g_ee:
+                        _flog(f"[DISPATCH-GUARD] emergency move raised: {_g_ee!r}")
+                    if not _GO_EMITTED:
+                        if _g_emerg and _g_emerg not in ("resign", "win"):
+                            _flog(f"[DISPATCH-GUARD] handler died without bestmove "
+                                  f"— emergency move {_g_emerg!r}")
+                            _safe_bestmove(_g_emerg, label="dispatch-guard")
+                        else:
+                            _flog("[DISPATCH-GUARD] handler died without bestmove "
+                                  "and no surviving engine could move — resign")
+                            _safe_bestmove("resign", label="dispatch-guard")
+            except Exception as _g_fe:
+                _flog(f"[DISPATCH-GUARD] fallback raised (ignored): {_g_fe!r}")
 
     _flog("stdin EOF — GUI closed without quit command")
     _shutdown(ctx, "stdin-eof")
@@ -11137,7 +11384,7 @@ def log(msg):
 
 def _start_prefetch_after_bestmove(ctx, position, ponder_move, move_count,
                                    alt_reply=None):
-    ctx.gps.ponder_alt_reply = alt_reply
+    ctx.game_progress.ponder_alt_reply = alt_reply
     if not ponder_move:
         return
     if ctx.endgame_mode:
@@ -11189,13 +11436,13 @@ def _start_prefetch_after_bestmove(ctx, position, ponder_move, move_count,
         )
         ctx.prefetch.start(ctx.dl_1, ponder_pos,
                        _params["POLICY_MOVES"], ctx.cfg.dl_prefetch_nodes,
-                       timeout=_tdg.dl_time_fallback_ms / 1000.0,
+                       timeout=_time_dyn.dl_time_fallback_ms / 1000.0,
                        dl_2=ctx.dl_2 if _use_dl2_pre else None,
                        dl_2_lock=ctx.dl_2_lock if _use_dl2_pre else None,
                        dl_2_opponent_turn_pos=_opponent_turn_pos_for_g,
                        prefetch_top_n=_effective_top_n,
                        dl_3=(ctx.dl_3 if (
-                           ctx.dl_3 is not None and ctx.dl_3._alive
+                           _eng_alive(ctx.dl_3)
                            and ctx.endgame_mode
                        ) else None),
                        dl_3_lock=getattr(ctx, "dl_3_lock", None))
@@ -11214,13 +11461,13 @@ def _activate_endgame(ctx, reason, eff_s=None):
 
     if ctx.cfg.endgame_fv_scale > 0:
         try:
-            _tgt = ctx.nnue_1
-            if _tgt is not None and _tgt._alive:
+            _target = ctx.nnue_1
+            if _eng_alive(_target):
                 _fv = _nnue_1_fv_scale
                 assert _fv is not None and str(_fv).strip() != "", (
                     "nnue_1 FV_Scale not resolved (config schema drift)")
                 ctx._original_fv_scale = int(_fv)
-                _tgt.send(f"setoption name FV_Scale value {ctx.cfg.endgame_fv_scale}")
+                _target.send(f"setoption name FV_Scale value {ctx.cfg.endgame_fv_scale}")
                 _flog(f"[ENDGAME 2-1] FV_Scale -> {ctx.cfg.endgame_fv_scale} (endgame promotion)")
         except Exception as _fve:
             _flog(f"[ignored] ENDGAME FV_Scale switch: {_fve}")
@@ -11268,11 +11515,11 @@ def _deactivate_endgame(ctx, move_count=None, cur_game_phase=None,
 
     if ctx.cfg.endgame_fv_scale > 0:
         try:
-            _tgt = ctx.nnue_1 if (ctx.nnue_1 is not None and ctx.nnue_1._alive) else None
-            if _tgt is not None:
+            _target = ctx.nnue_1 if _eng_alive(ctx.nnue_1) else None
+            if _target is not None:
                 _orig_fvs = getattr(ctx, "_original_fv_scale", None)
                 if _orig_fvs is not None:
-                    _tgt.send(f"setoption name FV_Scale value {_orig_fvs}")
+                    _target.send(f"setoption name FV_Scale value {_orig_fvs}")
                     _flog(f"[ENDGAME 2-1] FV_Scale restored -> {_orig_fvs} (council resume)")
         except Exception as _fve:
             _flog(f"[ignored] ENDGAME FV_Scale restore: {_fve}")
@@ -11311,6 +11558,7 @@ def _deactivate_endgame(ctx, move_count=None, cur_game_phase=None,
 
 _ACTIVE_BESTMOVE_SINK = None
 _BESTMOVE_IS_INSTANT = False
+_GO_EMITTED = False
 
 
 def _set_bestmove_sink(sink):
@@ -11319,6 +11567,8 @@ def _set_bestmove_sink(sink):
 
 
 def _safe_bestmove(final_move, ponder_move=None, label="", nnue_info=None):
+    global _GO_EMITTED
+    _GO_EMITTED = True
     if not final_move or not final_move.strip():
         _recovered = ""
         if nnue_info is not None:
@@ -11371,9 +11621,12 @@ def _safe_bestmove(final_move, ponder_move=None, label="", nnue_info=None):
         _sd_part  = f" seldepth {_seldepth}" if _seldepth > 0 else ""
         _nnue_best = nnue_info.get("bestmove", "")
         _move_changed = (_nnue_best != final_move)
-        _IS_MATE_SCORE = abs(_score_cp) >= 29000
         _score_cp_out = -_score_cp
-        if _score_cp != 0 and _move_changed and not _suppress_info_print and _ACTIVE_BESTMOVE_SINK is None:
+        _should_print_info = (_score_cp != 0
+                              and _move_changed
+                              and not _suppress_info_print
+                              and _ACTIVE_BESTMOVE_SINK is None)
+        if _should_print_info:
             _info_line = (
                 f"info depth {_depth}{_sd_part}"
                 f" score cp {_score_cp_out}"
@@ -11406,10 +11659,17 @@ def _safe_bestmove(final_move, ponder_move=None, label="", nnue_info=None):
         _sink_pv = (nnue_info.get("pv", "") or "") if nnue_info else ""
         try:
             _sink(final_move, ponder_move, _sink_depth, _sink_score_cp, _sink_pv)
-        except TypeError:
-            _sink(final_move, ponder_move, _sink_depth, _sink_score_cp)
         except Exception as _se:
-            _flog(f"[CSA] bestmove sink raised (ignored): {_se}")
+            _flog(f"[CSA] bestmove sink raised — retrying once: {_se!r}")
+            try:
+                _sink(final_move, ponder_move, _sink_depth, _sink_score_cp, _sink_pv)
+            except Exception as _se2:
+                _flog(f"[CSA] CRITICAL: bestmove sink retry failed: {_se2!r} "
+                      f"— falling back to USI stdout: {bm_line!r}")
+                try:
+                    print(bm_line, flush=True)
+                except OSError:
+                    pass
         _BESTMOVE_IS_INSTANT = False
         _DLPONDER_STATE["bm_ts"] = time.monotonic()
         try:
@@ -11451,9 +11711,7 @@ def _revive_due_core(attempts, max_attempts, now_s, next_ok_s,
         return False
     if attempts >= max_attempts:
         return False
-    if now_s < next_ok_s:
-        return False
-    return True
+    return now_s >= next_ok_s
 
 
 _REVIVE_CTX_REF = None
@@ -11507,7 +11765,7 @@ def _revive_worker(ctx, items):
                         pass
             setattr(ctx, slot.attr, eng)
             if slot.attr == "dl_3":
-                ctx.gps.dl_3_readyok_streak = 0
+                ctx.game_progress.dl_3_readyok_streak = 0
             _flog(f"[REVIVE] {name} revived and re-attached "
                   f"(attempt {slot.attempts}) — active from next move")
         except Exception as _e:
@@ -11566,7 +11824,7 @@ def _mon_cpu_pct_core(prev_idle, prev_total, idle, total):
     d_idle = idle - prev_idle
     if d_total <= 0:
         return None
-    return max(0.0, min(100.0, 100.0 * (1.0 - d_idle / d_total)))
+    return _clamp(100.0 * (1.0 - d_idle / d_total), 0.0, 100.0)
 
 
 def _mon_linux_cpu_sample():
@@ -11622,13 +11880,7 @@ if os.name == "nt":
                     ("dwFlags", _wt.DWORD), ("szExeFile", ctypes.c_wchar * 260)]
 
     def _mon_win_system():
-        try:
-            st = _MEMORYSTATUSEX(); st.dwLength = ctypes.sizeof(st)
-            if not ctypes.windll.kernel32.GlobalMemoryStatusEx(ctypes.byref(st)):
-                return None, None
-            return int(st.ullTotalPhys // (1024 * 1024)), int(st.ullAvailPhys // (1024 * 1024))
-        except Exception:
-            return None, None
+        return _sys_ram_info()
 
     def _mon_win_cpu_sample():
         try:
@@ -11706,7 +11958,7 @@ def _mon_snapshot_line(ctx, cpu_pct):
     for attr in _MON_ENGINE_ATTRS:
         eng = getattr(ctx, attr, None)
         try:
-            if eng is not None and eng._alive and eng.proc is not None:
+            if _eng_alive(eng) and eng.proc is not None:
                 rss = _mon_proc_rss(eng.proc.pid)
                 if rss is not None:
                     parts.append(f"{attr}={rss}MB")
@@ -11736,13 +11988,17 @@ def _mon_snapshot_line(ctx, cpu_pct):
     warn = (total_mb is not None and avail_mb is not None
             and _monitor_low_ram_warn_mb > 0
             and avail_mb < _monitor_low_ram_warn_mb)
-    return "[MON] " + " ".join(parts), warn, avail_mb
+    _vram_free = (vt - vu) if (vt is not None and vu is not None) else None
+    return "[MON] " + " ".join(parts), warn, avail_mb, _gpu_pct, _vram_free
 
 
 _mon_idle_cores = None
+_mon_avail_mb = None
+_mon_gpu_util = None
+_mon_vram_free_mb = None
 
 def _mon_loop(ctx):
-    global _mon_idle_cores
+    global _mon_idle_cores, _mon_avail_mb, _mon_gpu_util, _mon_vram_free_mb
     prev_idle, prev_total = _mon_sample_cpu()
     while True:
         try:
@@ -11752,12 +12008,25 @@ def _mon_loop(ctx):
             prev_idle, prev_total = idle, total
             if cpu is not None:
                 _mon_idle_cores = _safe_cpu_count() * (100.0 - cpu) / 100.0
-            line, warn, avail = _mon_snapshot_line(ctx, cpu)
+            line, warn, avail, _g_pct, _vf = _mon_snapshot_line(ctx, cpu)
+            _mon_avail_mb = avail
+            if _g_pct is not None:
+                _mon_gpu_util = _g_pct
+            if _vf is not None:
+                _mon_vram_free_mb = _vf
             _flog(line)
             if warn:
                 _flog(f"[MON][WARN] low system memory: {avail}MB available "
                       f"(< {_monitor_low_ram_warn_mb}MB) — メモリ枯渇による"
                       f"子エンジン連鎖クラッシュの前兆。Hash 配分の見直しを推奨。")
+            with _unreapable_lock:
+                if _unreapable_procs:
+                    _reaped = [p for p in _unreapable_procs if p.poll() is not None]
+                    for _zp in _reaped:
+                        _unreapable_procs.remove(_zp)
+                        _flog(f"[MON][ZOMBIE-REAP] reaped pid={_zp.pid} rc={_zp.returncode}")
+                    if _unreapable_procs:
+                        _flog(f"[MON][ZOMBIE] {len(_unreapable_procs)} unreapable proc(s)")
         except Exception as _me:
             try:
                 _flog(f"[MON] sample failed (non-fatal): {_me}")
@@ -11769,7 +12038,7 @@ def _mon_loop(ctx):
 def _mon_start(ctx):
     return
     try:
-        line, warn, _ = _mon_snapshot_line(ctx, None)
+        line, warn, *_ = _mon_snapshot_line(ctx, None)
         _flog(line + " (baseline)")
         threading.Thread(target=_mon_loop, args=(ctx,),
                          daemon=True, name="resource-monitor").start()
@@ -11792,7 +12061,7 @@ def _restart_readyok_budget_s(ctx, default_s=30.0):
                     _cands.append(_tot / 1000.0)
         if not _cands:
             return float(default_s)
-        return max(2.0, min(30.0, min(_cands) * 0.5))
+        return _clamp(min(_cands) * 0.5, 2.0, 30.0)
     except Exception:
         return float(default_s)
 
@@ -11808,7 +12077,7 @@ def _restart_child_budget_s(clock_base):
         _tot_s = _tot_ms / 1000.0
         if _tot_s < 15.0:
             return 0.0
-        return max(2.0, min(10.0, _tot_s * 0.25))
+        return _clamp(_tot_s * 0.25, 2.0, 10.0)
     except Exception:
         return None
 
@@ -11891,6 +12160,7 @@ def _restart_nnue_impl(ctx, caller, *, slot, readyok_timeout=None, async_launch=
                     _flog(f"{caller}: endgame_fv_scale={ctx.cfg.endgame_fv_scale} re-applied to fresh nnue_1")
             except Exception as _fe:
                 _flog(f"{caller}: FV_Scale re-apply failed: {_fe!r}")
+        _assert_sp_consistency(ctx, "post-restart")
 
     def _lower_hash_retry():
         try:
@@ -12000,14 +12270,14 @@ def _route_dl_model_for_eff_s(ctx, eff_s: float):
         return
     want = (ctx.cfg.dl_1_model_fast if eff_s <= ctx.cfg.dl_model_routing_eff_s_threshold
             else ctx.cfg.dl_1_model_default)
-    if not want or want == ctx.gps.dl_1_model_current:
+    if not want or want == ctx.game_progress.dl_1_model_current:
         return
     if not ctx.dl_1._alive:
         return
     try:
         ctx.dl_1.setoption("DNN_Model1", want)
         _dl_1_opts["DNN_Model1"] = want
-        ctx.gps.dl_1_model_current = want
+        ctx.game_progress.dl_1_model_current = want
         _dlog(f"DL model routed: {want} (eff_s={eff_s:.2f})")
     except Exception as e:
         _flog(f"DL model routing error (non-fatal): {e}")
@@ -12018,13 +12288,13 @@ def _apply_slow_mover(eng, opts, user_set, label, cfg, eff_s=None, go_clock=None
     if eff_s is None:
         eff_s = go_clock.eff_s
     _dynamic_slow = _calc_slow_mover(eff_s, cfg=cfg,
-                                     time_aggression=_tdg.time_aggression_nnue_dyn)
+                                     time_aggression=_time_dyn.time_aggression_nnue_dyn)
     _current_slow = int(opts.get("SlowMover", 185))
     if _dynamic_slow != _current_slow:
         eng.send(f"setoption name SlowMover value {_dynamic_slow}")
         opts["SlowMover"] = str(_dynamic_slow)
         _dlog(f"{label} SlowMover updated: {_current_slow} → {_dynamic_slow} "
-              f"(eff_s={eff_s:.1f} nnue_dyn={_tdg.time_aggression_nnue_dyn:.3f})")
+              f"(eff_s={eff_s:.1f} nnue_dyn={_time_dyn.time_aggression_nnue_dyn:.3f})")
 
 
 def _consensus_skip_wait_ms_core(eff_s, base_ms, per_sec_ms, min_ms, max_ms):
@@ -12057,9 +12327,9 @@ def _dl_2_fetch_thread_fn(p: "Dl2FetchParams", s: "Dl2RunState") -> None:
         _dl_top_for_consensus = None
         _dl_score_margin = None
         if p.cache_miss:
-            if p.dl1fs is not None and p.dl1fs.result is not None:
-                _policy_local = p.dl1fs.result[0]
-                if _policy_local and len(_policy_local) > 0:
+            if p.dl1_fetch is not None and p.dl1_fetch.result is not None:
+                _policy_local = p.dl1_fetch.result[0]
+                if _policy_local:
                     _dl_top_for_consensus = _policy_local[0][0]
                     if len(_policy_local) >= 2:
                         _dl_score_margin = _policy_local[0][1] - _policy_local[1][1]
@@ -12078,7 +12348,8 @@ def _dl_2_fetch_thread_fn(p: "Dl2FetchParams", s: "Dl2RunState") -> None:
                 p.consensus_skip_wait_max_ms,
             )
             p.nnue_pv_head_event.wait(timeout=_consensus_wait_ms / 1000.0)
-            _nnue_head              = p.nnue_pv_head_depth_holder[0]
+            with p._nnue_pv_head_lock:
+                _nnue_head          = p.nnue_pv_head_depth_holder[0]
             _nnue_top_for_consensus = _nnue_head[0] if _nnue_head else None
             _nnue_depth             = _nnue_head[1] if _nnue_head else 0
 
@@ -12148,7 +12419,7 @@ def _dl_2_fetch_thread_fn(p: "Dl2FetchParams", s: "Dl2RunState") -> None:
         _dl_2_raw = fetch_dl_policy(
             p.ctx.dl_2, p.ctx.current_position, 1,
             _dl_2_node_budget(_time_aggression_dyn_ratio(
-                _tdg.time_aggression_dl_dyn, _time_aggression_base, hi=1.2)),
+                _time_dyn.time_aggression_dl_dyn, _time_aggression_base, hi=1.2)),
             timeout=p.dl_2_timeout,
             gap_min=p.dl_gap_min_used,
             eff_s=p.eff_s,
@@ -12293,6 +12564,8 @@ def _dl_1_fetch_thread_fn(p: "Dl1FetchParams", s: "Dl1FetchState") -> None:
                 p.ctx.dl_1.send(p.position)
                 p.ctx.dl_1.send(f"go nodes {_DL_CONT_NODES}")
                 _cont_line = p.ctx.dl_1.wait_for("bestmove", timeout=60.0)
+                if not _cont_line:
+                    p.ctx.dl_1.send("stop")
                 if _cont_line and _raw[0]:
                     _cont_parts = _cont_line.split()
                     _cont_move = _cont_parts[1] if len(_cont_parts) > 1 else None
@@ -12409,7 +12682,7 @@ def _opponent_id_parse_names(raw):
 def _opponent_id_match_name_core(opponent_name, nnue_names, dl_names, hybrid_names):
     if not opponent_name:
         return None
-    name = str(opponent_name).strip().lower()
+    name = _norm_str(opponent_name)
     if not name:
         return None
     best = None
@@ -12453,7 +12726,7 @@ def _game_phase_policy_urgent_core(score_cp, ply, draw_ply, urgent_margin):
         return False
     if ply < max(0, draw_ply - urgent_margin):
         return False
-    if score_cp is not None and abs(score_cp) >= 29000:
+    if score_cp is not None and abs(score_cp) >= _MATE_SCORE_CP:
         return False
     return True
 
@@ -12464,10 +12737,10 @@ def _game_phase_policy_direction_core(score_cp, side, opponent_style_local, tour
         return 0
     if draw_ply and draw_ply > 0 and ply is not None:
         if ply >= max(0, draw_ply - draw_ply_margin):
-            if score_cp is not None and abs(score_cp) >= 29000:
+            if score_cp is not None and abs(score_cp) >= _MATE_SCORE_CP:
                 return 0
             return +1
-    if score_cp is None or abs(score_cp) >= 29000:
+    if score_cp is None or abs(score_cp) >= _MATE_SCORE_CP:
         return 0
     win_th, lose_th = _decided_thresholds(side)
     if score_cp > win_th:
@@ -12508,9 +12781,9 @@ def _calc_candidate_game_phase_deltas(position_cmd, moves, game_phase_now, cfg):
 def _compute_game_phase_policy(score_cp, side, move_count, draw_ply, game_phase_value,
                                tournament_mode, opponent_style, ctx):
     opponent_style_eff = _opponent_id_effective_style(
-        opponent_style, ctx.gps.opponent_id_nnue_hits, ctx.gps.opponent_id_dl_hits,
-        ctx.gps.opponent_id_samples, ctx.cfg.opponent_id_min_n, ctx.cfg.opponent_id_margin,
-        forced=ctx.gps.opponent_id_forced_style)
+        opponent_style, ctx.game_progress.opponent_id_nnue_hits, ctx.game_progress.opponent_id_dl_hits,
+        ctx.game_progress.opponent_id_samples, ctx.cfg.opponent_id_min_n, ctx.cfg.opponent_id_margin,
+        forced=ctx.game_progress.opponent_id_forced_style)
     ply_margin, ply_urgent_margin = _game_phase_policy_ply_margins_core(
         draw_ply, ctx.cfg.game_phase_policy_draw_ply_margin,
         ctx.cfg.game_phase_policy_draw_ply_urgent_margin, ctx.cfg.game_phase_policy_draw_ply_ref)
@@ -12527,10 +12800,10 @@ def _compute_game_phase_policy(score_cp, side, move_count, draw_ply, game_phase_
 
 
 def _opponent_id_observe(ctx, position_cmd):
-    pending = ctx.gps.opponent_id_pending
+    pending = ctx.game_progress.opponent_id_pending
     if pending is None:
         return None
-    ctx.gps.opponent_id_pending = None
+    ctx.game_progress.opponent_id_pending = None
     try:
         base_tokens, nnue_pred, dl_pred = pending
         actual = _opponent_id_extract_actual_core(base_tokens,
@@ -12538,18 +12811,18 @@ def _opponent_id_observe(ctx, position_cmd):
         kind = _opponent_id_sample_kind_core(actual, nnue_pred, dl_pred)
         if kind is None:
             return None
-        ctx.gps.opponent_id_samples += 1
+        ctx.game_progress.opponent_id_samples += 1
         if kind == "nnue":
-            ctx.gps.opponent_id_nnue_hits += 1
+            ctx.game_progress.opponent_id_nnue_hits += 1
         elif kind == "dl":
-            ctx.gps.opponent_id_dl_hits += 1
+            ctx.game_progress.opponent_id_dl_hits += 1
         else:
-            ctx.gps.opponent_id_miss += 1
-        ctx.gps.opponent_id_last_sample = kind
+            ctx.game_progress.opponent_id_miss += 1
+        ctx.game_progress.opponent_id_last_sample = kind
         _dlog(f"[OPP-ID] 実手={actual} → {kind} "
               f"(nnue予測={nnue_pred} dl予測={dl_pred} | 累計 "
-              f"nnue {ctx.gps.opponent_id_nnue_hits} / dl {ctx.gps.opponent_id_dl_hits} "
-              f"/ miss {ctx.gps.opponent_id_miss}, n={ctx.gps.opponent_id_samples})")
+              f"nnue {ctx.game_progress.opponent_id_nnue_hits} / dl {ctx.game_progress.opponent_id_dl_hits} "
+              f"/ miss {ctx.game_progress.opponent_id_miss}, n={ctx.game_progress.opponent_id_samples})")
         return kind
     except Exception as _oe:
         _flog(f"[OPP-ID] 観測失敗 (無視): {_oe}")
@@ -12557,8 +12830,8 @@ def _opponent_id_observe(ctx, position_cmd):
 
 
 def _opponent_id_set_pending(ctx, position_cmd, final_move, nnue_pred, dl_pred):
-    ctx.gps.opponent_id_pending = None
-    if getattr(ctx.gps, "opponent_id_forced_style", None) is not None:
+    ctx.game_progress.opponent_id_pending = None
+    if getattr(ctx.game_progress, "opponent_id_forced_style", None) is not None:
         return
     if _opponent_style in ("nnue", "dl"):
         return
@@ -12573,7 +12846,7 @@ def _opponent_id_set_pending(ctx, position_cmd, final_move, nnue_pred, dl_pred):
     except Exception as _pe:
         _flog(f"[OPP-ID] pending 基底生成失敗 (無視): {_pe}")
         return
-    ctx.gps.opponent_id_pending = (base, nnue_pred, dl_pred)
+    ctx.game_progress.opponent_id_pending = (base, nnue_pred, dl_pred)
     _dlog(f"[OPP-ID] pending: 自手={final_move} nnue予測={nnue_pred} "
           f"dl予測={dl_pred} (不一致サンプル候補)")
 
@@ -12607,7 +12880,7 @@ def _council_apply_boost(
     eff_ms: float,
     game_phase_value: float,
     cfg=None,
-    regime_label: str = "alert",
+    regime_label: str = _REGIME_ALERT,
 ) -> "_CouncilBoostResult":
     _original_eff_s = eff_s
     _EFF_S_BOOST_MAX_FACTOR = 2.5
@@ -12636,7 +12909,6 @@ def _council_apply_boost(
             and game_phase_value >= _em_game_phase_min
             and _gap_em_ok):
         eff_s  *= _em_boost
-        eff_ms  = eff_s * 1000.0
         _disagree_eff_s_boosted     = True
         _disagree_emergency_boosted = True
         _dlog(f"[DISAGREE-C1①'EMERGENCY] score={dis.disagreement_score} "
@@ -12658,7 +12930,6 @@ def _council_apply_boost(
         _boost = _b_score2
         if _boost > 1.0:
             eff_s  *= _boost
-            eff_ms  = eff_s * 1000.0
             _disagree_eff_s_boosted = True
             _dlog(f"[DISAGREE-C1①] score=2 gap={dis.score_gap_dl_nnue}cp "
                   f"boost×{_boost:.3f} → eff_s={eff_s:.2f}s")
@@ -12666,7 +12937,6 @@ def _council_apply_boost(
         _boost = _b_score1
         if _boost > 1.0:
             eff_s  *= _boost
-            eff_ms  = eff_s * 1000.0
             _disagree_eff_s_boosted = True
             _dlog(f"[DISAGREE-C1①] score=1 gap={dis.score_gap_dl_nnue}cp "
                   f"boost×{_boost:.3f} → eff_s={eff_s:.2f}s")
@@ -12688,7 +12958,6 @@ def _council_apply_boost(
         _effective_boost = 1.0 + (_stab_boost - 1.0) * _stab_game_phase_factor
         if _effective_boost > 1.0:
             eff_s  *= _effective_boost
-            eff_ms  = eff_s * 1000.0
             _stability_eff_s_boosted = True
             _dlog(f"[DISAGREE-C2②] swing={_max_swing}cp game_phase={game_phase_value:.3f} "
                   f"game_phase_factor={_stab_game_phase_factor:.3f} "
@@ -12701,19 +12970,17 @@ def _council_apply_boost(
             and dis.game_phase_delta >= _surge_thresh
             and _surge_boost > 1.0):
         eff_s  *= _surge_boost
-        eff_ms  = eff_s * 1000.0
         _game_phase_surge_boosted = True
         _dlog(f"[GP-SURGE③] delta={dis.game_phase_delta:.4f} "
               f"boost×{_surge_boost:.3f} → eff_s={eff_s:.2f}s")
 
     _regime_eff_s_scale = 1.0
-    if regime_label == "cruise":
+    if regime_label == _REGIME_CRUISE:
         _regime_eff_s_scale = _REGIME_CRUISE_EFF_S_SCALE
-    elif regime_label == "crisis":
+    elif regime_label == _REGIME_CRISIS:
         _regime_eff_s_scale = _REGIME_CRISIS_EFF_S_BOOST
     if _regime_eff_s_scale != 1.0:
         eff_s  *= _regime_eff_s_scale
-        eff_ms  = eff_s * 1000.0
         _dlog(f"[REGIME④] regime={regime_label} "
               f"scale×{_regime_eff_s_scale:.3f} → eff_s={eff_s:.2f}s")
 
@@ -12724,8 +12991,8 @@ def _council_apply_boost(
         _dlog(f"[BOOST-CAP] eff_s={eff_s:.2f}s → capped at {_eff_s_cap:.2f}s "
               f"(original={_original_eff_s:.2f}s ×{_cap_factor})")
         eff_s  = _eff_s_cap
-        eff_ms = eff_s * 1000.0
 
+    eff_ms = eff_s * 1000.0
     return _CouncilBoostResult(
         eff_s                  = eff_s,
         eff_ms                 = eff_ms,
@@ -12764,7 +13031,7 @@ def _arb_movetime_ms_core(pre_boost_eff_s, boosted_eff_s,
     delta_ms = 0.0
     if pre_boost_eff_s is not None and boosted_eff_s is not None:
         delta_ms = max(0.0, (float(boosted_eff_s) - float(pre_boost_eff_s)) * 1000.0)
-    mt = max(float(min_ms), min(float(max_ms), delta_ms if delta_ms > 0 else float(min_ms)))
+    mt = _clamp(delta_ms if delta_ms > 0 else float(min_ms), float(min_ms), float(max_ms))
     if remaining_eff_ms is not None:
         budget_cap = float(remaining_eff_ms) * float(budget_ratio)
         if mt > budget_cap:
@@ -12827,8 +13094,8 @@ def _arb_prestart_ensure_nnue_2(ctx, cfg, eff_s):
         return eng
     if _arb_prestart_wake_due_core(_endgame_separate, eng._alive,
                            cfg.arb1_prestart_nnue2,
-                           ctx.gps.arb1_prestart_attempted):
-        ctx.gps.arb1_prestart_attempted = True
+                           ctx.game_progress.arb1_prestart_attempted):
+        ctx.game_progress.arb1_prestart_attempted = True
         threading.Thread(target=_arb_prestart_wake_worker, args=(ctx, cfg),
                          daemon=True, name="arb1-nnue2-wake").start()
     return None
@@ -12847,7 +13114,7 @@ def _ponder_arb_predict_core(full_pv, final_move, ponder_move):
 
 
 def _ponder_arb_signal_stop(ctx):
-    gps = ctx.gps
+    gps = ctx.game_progress
     gps.ponder_arb_gen += 1
     ev = gps.ponder_arb_stop
     if ev is not None:
@@ -12860,20 +13127,20 @@ def _ponder_arb_signal_stop(ctx):
 def _ponder_arb_drain(ctx, timeout_s=None):
     if timeout_s is None:
         timeout_s = _ARB_SYNC_TIMEOUT_S
-    th = ctx.gps.ponder_arb_thread
+    th = ctx.game_progress.ponder_arb_thread
     if th is None or not th.is_alive():
-        ctx.gps.ponder_arb_thread = None
+        ctx.game_progress.ponder_arb_thread = None
         return True
     th.join(timeout=timeout_s)
     if th.is_alive():
         return False
-    ctx.gps.ponder_arb_thread = None
+    ctx.game_progress.ponder_arb_thread = None
     return True
 
 
 def _ponder_arb_worker(ctx, cfg, ponder_pos, pred_z, dl_pred, use_poll,
                    stop_event, my_gen):
-    gps = ctx.gps
+    gps = ctx.game_progress
     try:
         if use_poll:
             r1 = None
@@ -12894,7 +13161,7 @@ def _ponder_arb_worker(ctx, cfg, ponder_pos, pred_z, dl_pred, use_poll,
                 or dl_move == pred_z):
             return
         eng = _arb_prestart_ensure_nnue_2(ctx, cfg, None)
-        if eng is None or not eng._alive:
+        if not _eng_alive(eng):
             return
         if stop_event.is_set() or gps.ponder_arb_gen != my_gen:
             return
@@ -12931,7 +13198,7 @@ def _ponder_arb_worker(ctx, cfg, ponder_pos, pred_z, dl_pred, use_poll,
 
 def _ponder_arb_launch(ctx, ponder_pos):
     cfg = ctx.cfg
-    gps = ctx.gps
+    gps = ctx.game_progress
     pred_z = gps.ponder_arb_pred
     dl_pred = gps.ponder_arb_pred_dl
     use_poll = not _dl_ponder_enable
@@ -12959,7 +13226,7 @@ def _ponder_arb_launch(ctx, ponder_pos):
 
 
 def _ponder_arb_consume(ctx, nnue_move, dl_move, drain_timeout_s=None):
-    gps = ctx.gps
+    gps = ctx.game_progress
     if gps.ponder_arb_thread is not None and gps.ponder_arb_thread.is_alive():
         if gps.ponder_arb_stop is not None:
             try:
@@ -12987,7 +13254,8 @@ def _ponder_arb_consume(ctx, nnue_move, dl_move, drain_timeout_s=None):
 
 def _speculative_arb_worker(ctx, cfg, position_cmd, speculative_arb_dl_ready, speculative_arb_stop,
                   speculative_arb_result_holder,
-                  nnue_pv_head_depth_holder, nnue_pv_head_event):
+                  nnue_pv_head_depth_holder, nnue_pv_head_event,
+                  nnue_pv_head_lock=None):
     try:
         if not speculative_arb_dl_ready.wait(timeout=30.0):
             return
@@ -13011,10 +13279,14 @@ def _speculative_arb_worker(ctx, cfg, position_cmd, speculative_arb_dl_ready, sp
         for _ in range(_MAX_WAIT_ROUNDS):
             if speculative_arb_stop.is_set():
                 return
-            nnue_pv_head_event.wait(timeout=0.5)
+            time.sleep(0.5)
             if speculative_arb_stop.is_set():
                 return
-            head = nnue_pv_head_depth_holder[0]
+            if nnue_pv_head_lock is not None:
+                with nnue_pv_head_lock:
+                    head = nnue_pv_head_depth_holder[0]
+            else:
+                head = nnue_pv_head_depth_holder[0]
             if head is not None:
                 _mv, _depth = head
                 if _depth >= cfg.consensus_skip_min_depth:
@@ -13026,13 +13298,13 @@ def _speculative_arb_worker(ctx, cfg, position_cmd, speculative_arb_dl_ready, sp
         if dl_move == nnue_move:
             return
 
-        _pa_th = ctx.gps.ponder_arb_thread
+        _pa_th = ctx.game_progress.ponder_arb_thread
         if _pa_th is not None and _pa_th.is_alive():
             _flog("[SPARB] PREARB worker still active on nnue_2 — skipping")
             return
 
         eng = _arb_prestart_ensure_nnue_2(ctx, cfg, None)
-        if eng is None or not eng._alive:
+        if not _eng_alive(eng):
             return
         if speculative_arb_stop.is_set():
             return
@@ -13081,6 +13353,8 @@ def _speculative_arb_consume(speculative_arb_result_holder, speculative_arb_thre
     speculative_arb_result_holder[0] = None
     if res is None:
         return None
+    if not (isinstance(res, tuple) and len(res) == 4):
+        return None
 
     vote, meta, s_nnue, s_dl = res
 
@@ -13100,14 +13374,14 @@ def _arb_select_engine(ctx, cfg, game_phase, eff_s):
     if family == "none":
         return None, "none", family
     if family == "nnue" and cfg.arb1_enable:
-        _pa_th = ctx.gps.ponder_arb_thread
+        _pa_th = ctx.game_progress.ponder_arb_thread
         if _pa_th is not None and _pa_th.is_alive():
             _flog("[PREARB] worker busy on nnue_2 — ARB falls back to nnue_1")
         else:
             eng = _arb_prestart_ensure_nnue_2(ctx, cfg, eff_s)
             if eng is not None:
                 return eng, "arb1_nnue_2", family
-    if ctx.nnue_1 is not None and ctx.nnue_1._alive:
+    if _eng_alive(ctx.nnue_1):
         return ctx.nnue_1, "arb0_nnue_1", family
     return None, "none", family
 
@@ -13117,9 +13391,9 @@ _ARB_SYNC_TIMEOUT_S   = 1.5
 
 
 def _arb_run_searchmoves(eng, position_cmd, move_a, move_b, movetime_ms,
-                         label="", abort_event=None):
+                         label="", abort_event=None, live_info_cb=None):
     meta = {"score_cp": None, "depth": None, "elapsed_ms": 0.0, "reason": "ok"}
-    if eng is None or not eng._alive:
+    if not _eng_alive(eng):
         meta["reason"] = "engine_dead"
         return None, meta
     if not eng.flush_until_ready(timeout=_ARB_SYNC_TIMEOUT_S):
@@ -13157,7 +13431,7 @@ def _arb_run_searchmoves(eng, position_cmd, move_a, move_b, movetime_ms,
             return None, meta
         if not out:
             continue
-        if out.startswith("info") and "depth" in out and "score" in out:
+        if _is_scored_info(out):
             dm = _RE_DEPTH.search(out)
             d = int(dm.group(1)) if dm else 0
             if d >= _best_depth:
@@ -13168,8 +13442,14 @@ def _arb_run_searchmoves(eng, position_cmd, move_a, move_b, movetime_ms,
                 else:
                     mm = _RE_MATE.search(out)
                     if mm:
-                        meta["score_cp"] = 30000 if int(mm.group(1)) > 0 else -30000
+                        meta["score_cp"] = _mate_sign_score(int(mm.group(1)))
                 meta["depth"] = d
+                if live_info_cb is not None:
+                    _pv = out.split(" pv ", 1)[1].split() if " pv " in out else None
+                    try:
+                        live_info_cb(meta["score_cp"], d, _pv)
+                    except Exception:
+                        pass
         elif out.startswith("bestmove"):
             bm = _RE_BESTMOVE.match(out)
             meta["elapsed_ms"] = (time.perf_counter() - _t0) * 1000.0
@@ -13179,7 +13459,8 @@ def _arb_run_searchmoves(eng, position_cmd, move_a, move_b, movetime_ms,
 def _council_arbitrate(ctx, position_cmd, nnue_move, dl_move,
                        game_phase, eff_s, pre_boost_eff_s,
                        remaining_eff_ms, clock_remaining_ms,
-                       move_overhead_ms=0, arb_budget_cap_ms=None):
+                       move_overhead_ms=0, arb_budget_cap_ms=None,
+                       live_info_cb=None):
     cfg = ctx.cfg
     meta = {"engine": None, "family": None, "movetime_ms": 0,
             "score_cp": None, "depth": None, "elapsed_ms": 0.0,
@@ -13204,7 +13485,7 @@ def _council_arbitrate(ctx, position_cmd, nnue_move, dl_move,
     _n2_handoff = False
     if (label == "arb1_nnue_2"
             and cfg.arb1_nnue1_burst_threads > 0
-            and ctx.nnue_1 is not None and ctx.nnue_1._alive):
+            and _eng_alive(ctx.nnue_1)):
         _nnue1_std = str(_nnue_1_opts.get("Threads", "8"))
         try:
             ctx.nnue_1.send(
@@ -13221,7 +13502,8 @@ def _council_arbitrate(ctx, position_cmd, nnue_move, dl_move,
             _flog(f"[ARB-THR] nnue_2 thread raise failed (ignored): {_te}")
     try:
         sm_best, run_meta = _arb_run_searchmoves(
-            eng, position_cmd, nnue_move, dl_move, mt_ms, label=label)
+            eng, position_cmd, nnue_move, dl_move, mt_ms, label=label,
+            live_info_cb=live_info_cb)
     finally:
         if _n2_handoff:
             try:
@@ -13272,11 +13554,11 @@ def _get_tracking_board(ctx):
 def _mate_move_accepted(ctx, mate_move, source_label):
     if mate_move in (None, "", "resign", "win"):
         return True
-    _cb = _get_tracking_board(ctx)
-    if _cb is None:
+    _board = _get_tracking_board(ctx)
+    if _board is None:
         return True
     try:
-        _perpetual = _cb.is_perpetual_check_move(mate_move)
+        _perpetual = _board.is_perpetual_check_move(mate_move)
     except Exception as _mce:
         _flog(
             f"[MATE-CHECKPOINT] {source_label}: legality check raised — "
@@ -13300,10 +13582,29 @@ def _endgame_effective_veto_margin(ctx, game_phase):
     _base = ctx.cfg.endgame_dl_veto_wr_margin
     _lo   = ctx.cfg.endgame_dl_veto_game_phase_lo_scale
     _hi   = ctx.cfg.endgame_dl_veto_game_phase_hi_scale
-    _game_phase = max(0.0, min(1.0, float(game_phase)))
+    _game_phase = _clamp01(float(game_phase))
     _scale = _lo + (_hi - _lo) * _game_phase
     _margin = _base * _scale
     return _margin
+
+
+def _select_veto_model(ctx, eff_s, position_cmd, dl1_cache=None):
+    if (eff_s is not None
+            and eff_s >= ctx.cfg.endgame_dl_veto_dl1_min_eff_s
+            and _eng_alive(ctx.dl_1)):
+        _dl1_policy = None
+        if dl1_cache is not None:
+            try:
+                _dl1_policy = dl1_cache[0]
+            except (IndexError, TypeError):
+                pass
+        elif ctx.prefetch:
+            _r1 = ctx.prefetch.peek_dl_1(position_cmd)
+            if _r1 is not None:
+                _dl1_policy = _r1[0]
+        if _dl1_policy:
+            return _dl1_policy, "dl1"
+    return ctx.game_progress.dl_3_rescue_policy, "dl3_ponder"
 
 
 def _veto_result(meta, reason, result=None, dl_move=None, win_rate_dl=None, src=None):
@@ -13317,7 +13618,7 @@ def _veto_result(meta, reason, result=None, dl_move=None, win_rate_dl=None, src=
     return result, meta
 
 
-def _endgame_dl_veto_check(ctx, nnue_move, nnue_score_cp, eff_s):
+def _endgame_dl_veto_check(ctx, nnue_move, nnue_score_cp, eff_s, dl_policy=None, dl_src="dl3_ponder"):
 
     try:
         _veto_game_phase = _calc_game_phase(ctx.current_position, ctx.cfg) if hasattr(ctx, 'current_position') and ctx.current_position else 0.0
@@ -13333,90 +13634,45 @@ def _endgame_dl_veto_check(ctx, nnue_move, nnue_score_cp, eff_s):
         return _veto_result(meta, "eff_s_gate")
     if nnue_score_cp is None:
         return _veto_result(meta, "no_nnue_score")
-    if abs(int(nnue_score_cp)) >= 29000:
+    if abs(int(nnue_score_cp)) >= _MATE_SCORE_CP:
         return _veto_result(meta, "mate_score")
 
-    _vsl_nn, _va_nn = _win_rate_params_for_phase(_veto_game_phase, 'nnue', ctx.cfg)
-    _win_rate_nnue = _cp_to_winrate(nnue_score_cp, _vsl_nn, game_phase=_veto_game_phase, a=_va_nn)
+    _sl_nn, _a_nn = _win_rate_params_for_phase(_veto_game_phase, 'nnue', ctx.cfg)
+    _win_rate_nnue = _cp_to_winrate(nnue_score_cp, _sl_nn, game_phase=_veto_game_phase, a=_a_nn)
     meta["win_rate_nnue"] = _win_rate_nnue
-    _nodes = ctx.cfg.endgame_dl_veto_nodes if ctx.cfg.endgame_dl_veto_nodes > 0 else _dl_3_effective_nodes
 
-    if ctx.cfg.endgame_dl_veto_use_dl1 and ctx.dl_1 is not None and ctx.dl_1._alive:
-        try:
-            _cached = ctx.prefetch.peek_dl_1(ctx.current_position)
-        except Exception:
-            _cached = None
-        if _cached is not None:
-            try:
-                _c_policy = _cached[0]
-                if _c_policy and _c_policy[0]:
-                    _dl_move = _c_policy[0][0]
-                    _dl_cp   = _c_policy[0][1]
-                    if _dl_move not in (None, "", "resign", "win") and _dl_cp is not None:
-                        if _dl_move == nnue_move:
-                            return _veto_result(meta, "agree", dl_move=_dl_move, src="dl1_prefetch")
-                        _vsl_dl, _va_dl = _win_rate_params_for_phase(_veto_game_phase, 'dl', ctx.cfg)
-                        _win_rate_dl = _cp_to_winrate(_dl_cp, _vsl_dl, game_phase=_veto_game_phase, a=_va_dl)
-                        _veto_margin = _endgame_effective_veto_margin(ctx, _veto_game_phase)
-                        if (_win_rate_dl - _win_rate_nnue) >= _veto_margin:
-                            _dlog(lambda: f"[ENDGAME-VETO] GP={_veto_game_phase:.3f} margin={_veto_margin:.4f} wr_dl={_win_rate_dl:.3f} wr_nnue={_win_rate_nnue:.3f} src=dl1_prefetch -> veto")
-                            return _veto_result(meta, "veto", result=_dl_move, dl_move=_dl_move, win_rate_dl=_win_rate_dl, src="dl1_prefetch")
-                        _dlog(lambda: f"[ENDGAME-VETO] GP={_veto_game_phase:.3f} margin={_veto_margin:.4f} wr_dl={_win_rate_dl:.3f} wr_nnue={_win_rate_nnue:.3f} src=dl1_prefetch -> below_margin")
-                        return _veto_result(meta, "below_margin", dl_move=_dl_move, win_rate_dl=_win_rate_dl, src="dl1_prefetch")
-            except (IndexError, TypeError) as _ce:
-                _DLPONDER_STATE["endgame_veto_parse_err"] = int(_DLPONDER_STATE.get("endgame_veto_parse_err", 0)) + 1
-                _flog(f"[ignored] _endgame_dl_veto_check(prefetch-parse): {_ce} "
-                      f"(cumulative={_DLPONDER_STATE['endgame_veto_parse_err']})")
-
-    _engines = []
-    if ctx.cfg.endgame_dl_veto_use_dl1 and ctx.dl_1 is not None and ctx.dl_1._alive:
-        _engines.append(("dl1", ctx.dl_1))
-    if ctx.cfg.endgame_dl_veto_use_dl2 and ctx.dl_2 is not None and ctx.dl_2._alive:
-        _engines.append(("dl2", ctx.dl_2))
-    if not _engines:
-        return _veto_result(meta, "no_dl")
-
-    for _src, _eng in _engines:
-        try:
-            _r = fetch_dl_policy(
-                _eng, ctx.current_position, 1, _nodes,
-                timeout=ctx.cfg.endgame_dl_veto_timeout_s, eff_s=eff_s)
-        except Exception as _fe:
-            _DLPONDER_STATE["endgame_veto_parse_err"] = int(_DLPONDER_STATE.get("endgame_veto_parse_err", 0)) + 1
-            _flog(f"[ignored] _endgame_dl_veto_check({_src}): {_fe} "
-                  f"(cumulative={_DLPONDER_STATE['endgame_veto_parse_err']})")
-            continue
-        if not _r or not _r[0]:
-            continue
-        _dl_move = _r[0][0][0]
-        _dl_cp   = _r[0][0][1]
-        if _dl_move in (None, "", "resign", "win") or _dl_cp is None:
-            continue
-        if _dl_move == nnue_move:
-            return _veto_result(meta, "agree", dl_move=_dl_move, src=_src)
-        _vsl_dl, _va_dl = _win_rate_params_for_phase(_veto_game_phase, 'dl', ctx.cfg)
-        _win_rate_dl = _cp_to_winrate(_dl_cp, _vsl_dl, game_phase=_veto_game_phase, a=_va_dl)
-        _veto_margin = _endgame_effective_veto_margin(ctx, _veto_game_phase)
-        _veto_gap = _win_rate_dl - _win_rate_nnue
-        _veto_fire = _veto_gap >= _veto_margin
-        if (_ENDGAME_VETO_MODEL_WR and _veto_margin > 0
-                and abs(_veto_gap - _veto_margin) < 0.3 * _veto_margin):
-            _wr_m = _model_wr_for_position(ctx.current_position)
-            if _wr_m is not None:
-                _lean_dl = abs(_wr_m - _win_rate_dl) < abs(_wr_m - _win_rate_nnue)
-                _dlog(lambda: f"[ENDGAME-VETO][MODEL-3RD] wr_model={_wr_m:.3f} "
-                              f"lean={'dl' if _lean_dl else 'nnue'} "
-                              f"gap={_veto_gap:.4f} margin={_veto_margin:.4f} "
-                              f"(曖昧帯 → モデル裁定 {'維持' if _lean_dl == _veto_fire else '反転'})")
-                _veto_fire = _lean_dl
-                meta["model_3rd_wr"] = round(_wr_m, 4)
-        if _veto_fire:
-            _dlog(lambda: f"[ENDGAME-VETO] GP={_veto_game_phase:.3f} margin={_veto_margin:.4f} wr_dl={_win_rate_dl:.3f} wr_nnue={_win_rate_nnue:.3f} src={_src} -> veto")
-            return _veto_result(meta, "veto", result=_dl_move, dl_move=_dl_move, win_rate_dl=_win_rate_dl, src=_src)
-        _dlog(lambda: f"[ENDGAME-VETO] GP={_veto_game_phase:.3f} margin={_veto_margin:.4f} wr_dl={_win_rate_dl:.3f} wr_nnue={_win_rate_nnue:.3f} src={_src} -> below_margin")
-        meta["reason"] = "below_margin"; meta["dl_move"] = _dl_move
-        meta["win_rate_dl"] = _win_rate_dl; meta["src"] = _src
-    return None, meta
+    if not dl_policy:
+        return _veto_result(meta, "no_dl_cache")
+    try:
+        _dl_move = dl_policy[0][0]
+        _dl_cp   = dl_policy[0][1]
+    except (IndexError, TypeError, KeyError):
+        return _veto_result(meta, "dl_parse_err")
+    if _dl_move in (None, "", "resign", "win") or _dl_cp is None:
+        return _veto_result(meta, "dl_invalid")
+    if _dl_move == nnue_move:
+        return _veto_result(meta, "agree", dl_move=_dl_move, src=dl_src)
+    _sl_dl, _a_dl = _win_rate_params_for_phase(_veto_game_phase, 'dl', ctx.cfg)
+    _win_rate_dl = _cp_to_winrate(_dl_cp, _sl_dl, game_phase=_veto_game_phase, a=_a_dl)
+    _veto_margin = _endgame_effective_veto_margin(ctx, _veto_game_phase)
+    _veto_gap = _win_rate_dl - _win_rate_nnue
+    _veto_fire = _veto_gap >= _veto_margin
+    if (_ENDGAME_VETO_MODEL_WR and _veto_margin > 0
+            and abs(_veto_gap - _veto_margin) < 0.3 * _veto_margin):
+        _wr_m = _model_wr_for_position(ctx.current_position)
+        if _wr_m is not None:
+            _lean_dl = abs(_wr_m - _win_rate_dl) < abs(_wr_m - _win_rate_nnue)
+            _dlog(lambda: f"[ENDGAME-VETO][MODEL-3RD] wr_model={_wr_m:.3f} "
+                          f"lean={'dl' if _lean_dl else 'nnue'} "
+                          f"gap={_veto_gap:.4f} margin={_veto_margin:.4f} "
+                          f"(曖昧帯 → モデル裁定 {'維持' if _lean_dl == _veto_fire else '反転'})")
+            _veto_fire = _lean_dl
+            meta["model_3rd_wr"] = round(_wr_m, 4)
+    if _veto_fire:
+        _dlog(lambda: f"[ENDGAME-VETO] GP={_veto_game_phase:.3f} margin={_veto_margin:.4f} wr_dl={_win_rate_dl:.3f} wr_nnue={_win_rate_nnue:.3f} src={dl_src} -> veto")
+        return _veto_result(meta, "veto", result=_dl_move, dl_move=_dl_move, win_rate_dl=_win_rate_dl, src=dl_src)
+    _dlog(lambda: f"[ENDGAME-VETO] GP={_veto_game_phase:.3f} margin={_veto_margin:.4f} wr_dl={_win_rate_dl:.3f} wr_nnue={_win_rate_nnue:.3f} src={dl_src} -> below_margin")
+    return _veto_result(meta, "below_margin", dl_move=_dl_move, win_rate_dl=_win_rate_dl, src=dl_src)
 
 
 def _dl3_nnue_proxy_wr(ctx, nnue_full_pv, nnue_pv_depth, eff_s, time_aggression_ratio=1.0):
@@ -13431,7 +13687,7 @@ def _dl3_nnue_proxy_wr(ctx, nnue_full_pv, nnue_pv_depth, eff_s, time_aggression_
         return _skip("disabled")
     if eff_s is None or eff_s < ctx.cfg.dl3_proxy_min_eff_s:
         return _skip("eff_s_gate")
-    if ctx.dl_3 is None or not getattr(ctx.dl_3, "_alive", False):
+    if not _eng_alive(ctx.dl_3):
         return _skip("dl3_unavailable")
     if not nnue_full_pv or not nnue_full_pv.strip():
         return _skip("empty_pv")
@@ -13484,27 +13740,27 @@ def _dl3_nnue_proxy_wr(ctx, nnue_full_pv, nnue_pv_depth, eff_s, time_aggression_
     meta["reason"] = "ok"
     _dl3_game_phase = (_calc_game_phase(ctx.current_position, ctx.cfg)
                if getattr(ctx, 'current_position', None) else None)
-    _dsl, _da = _win_rate_params_for_phase(_dl3_game_phase, 'dl', ctx.cfg)
-    return _cp_to_winrate(_leaf_cp, _dsl, game_phase=_dl3_game_phase, a=_da), meta
+    _sl_dl, _a_dl = _win_rate_params_for_phase(_dl3_game_phase, 'dl', ctx.cfg)
+    return _cp_to_winrate(_leaf_cp, _sl_dl, game_phase=_dl3_game_phase, a=_a_dl), meta
 
 
 def _dl3_proxy_nnue_weight_core(nnue_score_cp, win_rate_leaf, cfg, game_phase=None):
     if win_rate_leaf is None or nnue_score_cp is None:
         return cfg.dl3_proxy_nnue_base_w
-    _psl, _pa = _win_rate_params_for_phase(game_phase, 'nnue', cfg)
-    win_rate_nnue = _cp_to_winrate(nnue_score_cp, _psl, game_phase=game_phase, a=_pa)
-    if win_rate_nnue <= 1e-6:
-        win_rate_nnue = 1e-6
-    if cfg.dl3_proxy_mode == "boost_only":
+    _sl_nn, _a_nn = _win_rate_params_for_phase(game_phase, 'nnue', cfg)
+    win_rate_nnue = _cp_to_winrate(nnue_score_cp, _sl_nn, game_phase=game_phase, a=_a_nn)
+    if win_rate_nnue <= _WINRATE_EPSILON:
+        win_rate_nnue = _WINRATE_EPSILON
+    if cfg.dl3_proxy_mode == _PROXY_MODE_BOOST_ONLY:
         ratio = max(1.0, win_rate_leaf / win_rate_nnue)
-    elif cfg.dl3_proxy_mode == "fuse":
+    elif cfg.dl3_proxy_mode == _PROXY_MODE_FUSE:
         win_rate_fused = (1.0 - cfg.dl3_proxy_fuse_alpha) * win_rate_nnue \
                    + cfg.dl3_proxy_fuse_alpha * win_rate_leaf
         ratio = win_rate_fused / win_rate_nnue
     else:
         ratio = win_rate_leaf / win_rate_nnue
     _w = cfg.dl3_proxy_nnue_base_w * ratio
-    return max(cfg.dl3_proxy_weight_min, min(cfg.dl3_proxy_weight_max, _w))
+    return _clamp(_w, cfg.dl3_proxy_weight_min, cfg.dl3_proxy_weight_max)
 
 
 def _dl2_suppress_on_agree_core(dl_top_vote, nnue_top_vote, dl_2_top_vote):
@@ -13554,13 +13810,7 @@ def _arb_gate_core(arb_enable, mate_detected, council_override_source,
         if final_move not in (dl_top_vote, nnue_top_vote):
             blocked_gates.append("winner_third")
 
-    should_fire = (is_dispute
-                   and not mate_detected
-                   and council_override_source != "dl1_conviction"
-                   and not arb_seed_won
-                   and not nnue1_book_absolute
-                   and final_move in (dl_top_vote, nnue_top_vote)
-                   and _arb_should_fire(disagreement_score))
+    should_fire = is_dispute and not blocked_gates
     return should_fire, blocked_gates
 
 
@@ -13596,7 +13846,6 @@ _MOVE_RECORD_DEFAULTS = {
     "dl_stability_spread": None,
     "dl_top_depth": None,
     "dl_pv_overlap": None,
-    "dl_sanity_withdrawn": False,
     "dl_gap_lift_applied": None,
     "dl_1_nnue_agree_pre_council": None,
     "dl_2_invoked": False,
@@ -13633,9 +13882,6 @@ _MOVE_RECORD_DEFAULTS = {
     "pv_mate_step": None,
     "pv_mate_source": None,
     "pv_mate_override": False,
-    "lre_result": None,
-    "lre_wr_leaf": None,
-    "lre_wr_root_b": None,
     "dl3_proxy_wr_leaf": None,
     "dl3_proxy_nnue_weight": None,
     "dl3_proxy_reason": None,
@@ -13726,6 +13972,7 @@ _MOVE_RECORD_DEFAULTS = {
     "regime_conviction":       None,
     "regime_label":           None,
     "regime_collapse":         None,
+    "regime_force_crisis":     None,
     "arb_tenth_fired":        False,
     "arb_tenth_flip":         False,
 }
@@ -13751,11 +13998,20 @@ def _record_side(rec):
 
 
 def _append_move_record(ctx, rec):
-    rec["decided"] = ctx.gps.decided_latched
+    _spd = ctx.game_progress.sp_move_diag
+    rec["sp_early_collected"] = bool(_spd.get("sp_early_collected")) if _spd else False
+    rec["sp_early_depth"]     = _spd.get("sp_early_depth")           if _spd else None
+    rec["sp_echo_rejected"]   = _spd.get("sp_echo_rejected", 0)     if _spd else 0
+    rec["sp_gen_rejected"]    = _spd.get("sp_gen_rejected", 0)      if _spd else 0
+    rec["sp_adopt_gate"]      = _spd.get("sp_adopt_gate")           if _spd else None
+    rec["sp_early_board"]     = _spd.get("sp_early_board")          if _spd else None
+    ctx.game_progress.sp_move_diag = None
 
-    if not ctx.gps.decided_latched:
+    rec["decided"] = ctx.game_progress.decided_latched
+
+    if not ctx.game_progress.decided_latched:
         sc = rec.get("nnue_score_cp")
-        if sc is not None and abs(sc) < 29000:
+        if sc is not None and abs(sc) < _MATE_SCORE_CP:
             side = _record_side(rec)
             if side is None:
                 _ply_side = rec.get("ply")
@@ -13763,7 +14019,7 @@ def _append_move_record(ctx, rec):
                     side = "sente" if _ply_side % 2 == 0 else "gote"
             win_th, lose_th = _decided_thresholds(side)
             if sc > win_th or sc < lose_th:
-                ctx.gps.decided_latched = True
+                ctx.game_progress.decided_latched = True
 
     if ctx.cfg.log_stats:
         try:
@@ -13778,12 +14034,12 @@ def _append_move_record(ctx, rec):
                 _sig = _obs_board.stance_signals(_mover_is_sente)
                 _game_phase_now = _calc_state_phase(*_game_phase_state_counts_core(_obs_board),
                                          cfg=ctx.cfg)
-                _game_phase_signed = _calc_game_phase_signed_delta(_game_phase_now, ctx.gps.stance_last_game_phase)
+                _game_phase_signed = _calc_game_phase_signed_delta(_game_phase_now, ctx.game_progress.stance_last_game_phase)
                 _sc_now = rec.get("nnue_score_cp")
                 _stance = _classify_stance_core(
                     game_phase_signed_delta=_game_phase_signed,
                     score_cp=_sc_now,
-                    score_prev_cp=ctx.gps.stance_last_score,
+                    score_prev_cp=ctx.game_progress.stance_last_score,
                     material=_sig["material"],
                     king_pressure_opp=_sig["king_pressure_opp"],
                     king_pressure_self=_sig["king_pressure_self"],
@@ -13795,9 +14051,9 @@ def _append_move_record(ctx, rec):
                 rec["stance_kp_opp"]      = _sig["king_pressure_opp"]
                 rec["stance_kp_self"]     = _sig["king_pressure_self"]
                 rec["stance_gives_check"] = _sig["in_check_opp"]
-                ctx.gps.stance_last_game_phase = _game_phase_now
+                ctx.game_progress.stance_last_game_phase = _game_phase_now
                 if _sc_now is not None:
-                    ctx.gps.stance_last_score = _sc_now
+                    ctx.game_progress.stance_last_score = _sc_now
             except Exception as _ste:
                 _dlog(f"[STANCE] classify skipped: {_ste!r}")
 
@@ -13847,7 +14103,7 @@ def _live_stats_append_move(ctx, rec):
 
 
 
-def _council_resolve_cache(ctx):
+def _council_lookup_prefetch_cache(ctx):
     cached, cached_dl2, cached_dl3, dl_cache_src = ctx.prefetch.get(ctx.current_position)
     prefetch_hit = cached is not None
 
@@ -13875,7 +14131,7 @@ def _dyn_apply_nnue_threads(ctx, eng, path):
         _idle = _mon_idle_cores
         if _idle is None:
             return
-        _spare = int(_cfg.get("Resource_Threads_Spare_Min", 1))
+        _spare = _RESOURCE_THREADS_SPARE_MIN
         _wc = (_tuning_worker_count
                if _tuning_mode and not _tuning_is_solo and _tuning_worker_count > 1
                else 1)
@@ -13884,6 +14140,8 @@ def _dyn_apply_nnue_threads(ctx, eng, path):
                             int(_cfg.get("nnue_1_Threads", 4)))
         _target = max(1, int(_nnue_now + _my_idle - _spare))
         _target = min(_target, _effective_cores())
+        if _target == getattr(eng, "_dyn_threads_last", None):
+            return
         eng.send(f"setoption name Threads value {_target}")
         _last = getattr(eng, "_dyn_threads_last", None)
         if _last != _target:
@@ -13897,10 +14155,93 @@ def _dyn_apply_nnue_threads(ctx, eng, path):
               f"{type(_de).__name__}: {_de}")
 
 
+def _dyn_apply_nnue_hash(eng, eng_name):
+    if not _dyn_threads_enable or eng is None:
+        return
+    if os.environ.get("PYFAMATE_DLP_CAL"):
+        return
+    try:
+        _avail = _mon_avail_mb
+        if _avail is None:
+            return
+        _orig = getattr(eng, "_dyn_hash_original", None)
+        if _orig is None:
+            eng._dyn_hash_original = int(_cfg.get(
+                f"{eng_name}_Hash", _cfg.get("USI_Hash", 256)))
+            _orig = eng._dyn_hash_original
+        _current = getattr(eng, "_dyn_hash_last", _orig)
+        _wc = (_tuning_worker_count
+               if _tuning_mode and not _tuning_is_solo
+               and _tuning_worker_count > 1 else 1)
+        _my_avail = _avail // max(1, _wc)
+        _margin = 512
+        if _my_avail < _margin:
+            _target = max(64, _current - (_margin - _my_avail))
+        elif _current < _orig:
+            _target = min(_orig, _current + (_my_avail - _margin) // 2)
+            if _target - _current < max(1024, _current // 4):
+                return
+        else:
+            return
+        if _target == _current:
+            return
+        eng.send(f"setoption name USI_Hash value {_target}")
+        eng.send("isready")
+        eng.flush_until_ready(timeout=60.0)
+        _flog(f"[BUDGET-DYN] {eng_name} Hash "
+              f"{_current}→{_target}MB "
+              f"(avail={_avail}MB per_worker={_my_avail}MB)")
+        eng._dyn_hash_last = _target
+    except Exception as _e:
+        _flog(f"[BUDGET-DYN] Hash adjust failed (ignored): {_e}")
+
+
+_dl_dyn_nodes_enable = _cfg_bool("DL_Dynamic_Nodes_Enable", False)
+_dl_dyn_nodes_gpu_thresh = int(_cfg.get("DL_Dynamic_Nodes_GPU_Thresh", "85"))
+_dl_dyn_nodes_floor_ratio = float(_cfg.get("DL_Dynamic_Nodes_Floor_Ratio", "0.25"))
+
+
+def _dyn_dl_nodes(base_nodes):
+    if not _dl_dyn_nodes_enable:
+        return base_nodes
+    gpu = _mon_gpu_util
+    if gpu is None or gpu < _dl_dyn_nodes_gpu_thresh:
+        return base_nodes
+    excess = (gpu - _dl_dyn_nodes_gpu_thresh) / max(1, 100 - _dl_dyn_nodes_gpu_thresh)
+    floor = max(32, int(base_nodes * _dl_dyn_nodes_floor_ratio))
+    target = max(floor, int(base_nodes * (1.0 - excess)))
+    if target != base_nodes:
+        _flog(f"[DL-DYN-NODES] nodes {base_nodes}→{target} "
+              f"(gpu={gpu}% thresh={_dl_dyn_nodes_gpu_thresh}%)")
+    return target
+
+
+_dl_2_resource_gate_enable = _cfg_bool("DL_2_Resource_Gate_Enable", False)
+_dl_2_resource_gate_gpu_thresh = int(_cfg.get("DL_2_Resource_Gate_GPU_Thresh", "90"))
+_dl_2_resource_gate_vram_margin = int(_cfg.get("DL_2_Resource_Gate_VRAM_Margin_MB", "1024"))
+
+
+def _dl_2_resource_gate_ok():
+    if not _dl_2_resource_gate_enable:
+        return True
+    gpu = _mon_gpu_util
+    if gpu is not None and gpu >= _dl_2_resource_gate_gpu_thresh:
+        _flog(f"[DL2-RESOURCE-GATE] SKIP: gpu={gpu}% "
+              f">= thresh={_dl_2_resource_gate_gpu_thresh}%")
+        return False
+    vf = _mon_vram_free_mb
+    if vf is not None and vf < _dl_2_resource_gate_vram_margin:
+        _flog(f"[DL2-RESOURCE-GATE] SKIP: vram_free={vf}MB "
+              f"< margin={_dl_2_resource_gate_vram_margin}MB")
+        return False
+    return True
+
+
 def _council_launch_nnue(ctx, line, move_count, go_clock):
     _apply_slow_mover(ctx.nnue_1, _nnue_1_opts,
-                      _nnue_slowmover_user_set, "SlowMover", go_clock=go_clock, cfg=ctx.cfg)
+                      ctx.cfg.nnue_slowmover_user_set, "SlowMover", go_clock=go_clock, cfg=ctx.cfg)
     _dyn_apply_nnue_threads(ctx, ctx.nnue_1, "council")
+    _dyn_apply_nnue_hash(ctx.nnue_1, "nnue_1")
     ctx.nnue_1.send(ctx.current_position)
     ctx.nnue_1.send(go_clock.patched_line)
 
@@ -13910,9 +14251,8 @@ def _run_council_search(ctx, line, move_count, dl_timeout,
                         use_dl, go_clock=None):
 
     if go_clock is None:
-        go_clock = _parse_go_clock(line, move_count, score_cp=ctx.gps.last_nnue_score_cp)
+        go_clock = _parse_go_clock(line, move_count, score_cp=ctx.game_progress.last_nnue_score_cp, cfg=ctx.cfg)
     eff_s = go_clock.eff_s
-    _clock_rem_ms = go_clock.remaining_ms if go_clock is not None else None
     nodes = _calc_dynamic_policy_nodes(eff_s, cfg=ctx.cfg)
 
     _t_go_start = time.perf_counter()
@@ -13920,7 +14260,6 @@ def _run_council_search(ctx, line, move_count, dl_timeout,
     _eff_s  = eff_s
     _eff_ms = _eff_s * 1000.0
     _is_total_budget = (go_clock is not None and go_clock.is_total_budget)
-    _relay_eff_s = 0.0 if _is_total_budget else _eff_s
     _time_budget = _allocate_time_budget(_eff_s, dl_timeout, ctx.cfg) if not _is_total_budget else None
     if _time_budget is not None and _time_budget.binding_summary != "infinite":
         _dlog(f"[FIX-6] time budget: {_time_budget.binding_summary}")
@@ -13928,7 +14267,7 @@ def _run_council_search(ctx, line, move_count, dl_timeout,
     (_game_phase_WHAND, _game_phase_P, _game_phase_INV, _game_phase_KING,
      _game_phase_EXPOSURE, _game_phase_PLY) = _calc_game_phase_features(ctx.current_position)
 
-    _child_agreement = ctx.gps.last_child_agreement
+    _child_agreement = ctx.game_progress.last_child_agreement
 
     _game_phase_value = _calc_game_phase(ctx.current_position, ctx.cfg,
                                          child_agreement=_child_agreement)
@@ -13937,15 +14276,14 @@ def _run_council_search(ctx, line, move_count, dl_timeout,
     _thresholds           = _calc_per_move_thresholds(_eff_s, cfg=ctx.cfg)
     _dl_gap_min_used      = _thresholds.gap_min
     _dl_stab_threshold_used = _thresholds.stab
-    _prev_boosted_eff_s   = ctx.gps.disagree_boosted_eff_s
-    _eff_s_for_dl2        = max(_eff_s, _prev_boosted_eff_s) if _prev_boosted_eff_s is not None else _eff_s
+    _prev_boosted_eff_s   = ctx.game_progress.disagree_boosted_eff_s
 
-    (cached, cached_dl2, _cached_dl3,
-     _prefetch_hit, _prefetch_j_hit, _dl_cache_src) = _council_resolve_cache(ctx)
+    (cached, cached_dl2, _,
+     _prefetch_hit, _prefetch_j_hit, _dl_cache_src) = _council_lookup_prefetch_cache(ctx)
 
     _council_launch_nnue(ctx, line, move_count, _go_clock)
 
-    _dl1fs          = None
+    _dl1_fetch          = None
     _dl_fetch_ms    = 0
     _dl_lock_wait_ms = 0
     _dl_total_ms    = 0
@@ -13963,7 +14301,7 @@ def _run_council_search(ctx, line, move_count, dl_timeout,
         _dl_thread = None
     else:
         ctx.prefetch.cancel()
-        _dl1fs = Dl1FetchState()
+        _dl1_fetch = Dl1FetchState()
         _t_dl_submit    = time.perf_counter()
 
         _dl_1_fetch_params = Dl1FetchParams(
@@ -13988,7 +14326,7 @@ def _run_council_search(ctx, line, move_count, dl_timeout,
                     pass
         _dl_thread = threading.Thread(
             target=_dl1_live_wrapper,
-            args=(_dl_1_fetch_params, _dl1fs),
+            args=(_dl_1_fetch_params, _dl1_fetch),
             daemon=True,
         )
         _dl_thread.start()
@@ -14004,19 +14342,19 @@ def _run_council_search(ctx, line, move_count, dl_timeout,
     _d2s = Dl2RunState()
     _dl_2_fetch_ms   = 0
     _dl_2_timeout_base = min(dl_timeout * ctx.cfg.dl_2_time_multiplier,
-                             _tdg.dl_2_time_max_ms / 1000.0)
+                             _time_dyn.dl_2_time_max_ms / 1000.0)
     if _prev_boosted_eff_s is not None and _prev_boosted_eff_s > _eff_s and _eff_s > 0:
         _ratio_cap = (ctx.cfg.disagree_emergency_dl2_cap
-                      if ctx.gps.disagree_boost_emergency else 2.0)
+                      if ctx.game_progress.disagree_boost_emergency else 2.0)
         _boost_ratio  = min(_prev_boosted_eff_s / _eff_s, _ratio_cap)
         dl_2_timeout  = min(_dl_2_timeout_base * _boost_ratio,
-                            _tdg.dl_2_time_max_ms / 1000.0)
+                            _time_dyn.dl_2_time_max_ms / 1000.0)
         _dlog(f"[DISAGREE-C⑩] dl_2_timeout boosted: {_dl_2_timeout_base:.3f}s "
               f"→ {dl_2_timeout:.3f}s (prev_boosted_eff_s={_prev_boosted_eff_s:.2f}s "
               f"eff_s={_eff_s:.2f}s ratio={_boost_ratio:.3f})")
     else:
         dl_2_timeout  = _dl_2_timeout_base
-    _game_phase_delta_early = _calc_game_phase_delta(_game_phase_value, ctx.gps.last_game_phase)
+    _game_phase_delta_early = _calc_game_phase_delta(_game_phase_value, ctx.game_progress.last_game_phase)
     _game_phase_surge_now = (
         _game_phase_delta_early is not None
         and _game_phase_delta_early >= ctx.cfg.game_phase_surge_threshold
@@ -14025,47 +14363,52 @@ def _run_council_search(ctx, line, move_count, dl_timeout,
         _surge_timeout_boost = ctx.cfg.game_phase_surge_dl2_timeout_boost
         dl_2_timeout = min(
             dl_2_timeout * _surge_timeout_boost,
-            _tdg.dl_2_time_max_ms / 1000.0
+            _time_dyn.dl_2_time_max_ms / 1000.0
         )
         _dlog(f"[GP-SURGE⑤] DL_2 timeout ×{_surge_timeout_boost:.2f} → {dl_2_timeout:.3f}s "
               f"(game_phase_delta={_game_phase_delta_early:.4f})")
 
     _nnue_pv_head_depth_holder = [None]
+    _nnue_pv_head_lock = threading.Lock()
     _nnue_pv_head_event = threading.Event()
 
     _dl2_live_depth_holder = [None]
 
     _cache_miss = (cached is None)
 
-    _dl_2_prefetch_hit_with_policy = (
-        _prefetch_hit and policy is not None and len(policy) > 0
-    )
 
     _s2_dl_prev_swing_high = False
-    _s2_prev_cs = ctx.gps.last_council_scores
-    _s2_dl_now  = policy[0][1] if (policy and len(policy) > 0) else None
-    if (_s2_prev_cs is not None and _s2_prev_cs[0] is not None and _s2_dl_now is not None
-            and abs(_s2_dl_now - _s2_prev_cs[0]) >= ctx.cfg.score_stability_swing_threshold_cp):
+    _s2_prev_scores = ctx.game_progress.last_council_scores
+    _s2_dl_now  = policy[0][1] if policy else None
+    if (_s2_prev_scores is not None and _s2_prev_scores[0] is not None and _s2_dl_now is not None
+            and abs(_s2_dl_now - _s2_prev_scores[0]) >= ctx.cfg.score_stability_swing_threshold_cp):
         _s2_dl_prev_swing_high = True
+
+    _nyugyoku_suppress = (ctx.cfg.consensus_skip_nyugyoku_disable
+                          and _game_phase_value is not None
+                          and _game_phase_value > 1.0)
+    _consensus_skip_ok = (not _game_phase_surge_now
+                          and not _nyugyoku_suppress
+                          and not _s2_dl_prev_swing_high)
 
     _dl_2_fetch_params = Dl2FetchParams(
         cache_miss                  = _cache_miss,
         dl_thread                   = _dl_thread,
-        dl1fs                       = _dl1fs,
+        dl1_fetch                   = _dl1_fetch,
         policy_cache_hit            = policy,
         ctx                         = ctx,
         dl_2_timeout                = dl_2_timeout,
         dl_gap_min_used             = _dl_gap_min_used,
-        dl_2_time_max_ms            = _tdg.dl_2_time_max_ms,
+        dl_2_time_max_ms            = _time_dyn.dl_2_time_max_ms,
         eff_s                       = _eff_s,
-        consensus_skip_enable       = not _game_phase_surge_now and not (ctx.cfg.consensus_skip_nyugyoku_disable and _game_phase_value is not None and _game_phase_value > 1.0) and not _s2_dl_prev_swing_high,
+        consensus_skip_enable       = _consensus_skip_ok,
         consensus_skip_wait_base_ms = ctx.cfg.consensus_skip_wait_base_ms,
         consensus_skip_wait_per_sec = ctx.cfg.consensus_skip_wait_per_sec_ms,
         consensus_skip_wait_min_ms  = ctx.cfg.consensus_skip_wait_min_ms,
         consensus_skip_wait_max_ms  = ctx.cfg.consensus_skip_wait_max_ms,
         consensus_skip_min_depth    = (
             max(0, int(ctx.cfg.consensus_skip_min_depth * _REGIME_CRUISE_CS_DEPTH_SCALE))
-            if ctx.gps.regime_label == "cruise"
+            if ctx.game_progress.regime_label == _REGIME_CRUISE
             else ctx.cfg.consensus_skip_min_depth
         ),
         consensus_skip_score_margin_min = ctx.cfg.consensus_skip_score_margin_min,
@@ -14078,13 +14421,13 @@ def _run_council_search(ctx, line, move_count, dl_timeout,
 
     _dl2_lat_override = _effective_latency_per_mb(
         ctx.cfg.dl_2_latency_per_mb_s,
-        ctx.gps.dl_2_latency_ewma,
-        ctx.gps.dl_2_latency_samples,
+        ctx.game_progress.dl_2_latency_ewma,
+        ctx.game_progress.dl_2_latency_samples,
         ctx.cfg.dl_2_latency_autocal_min_samples,
         True,
     )
     _dl_2_cold_margin_ms = _calc_dl_2_time_margin_ms(
-        _eff_s, ctx.gps.dl2_mb_ref, cfg=ctx.cfg, cold_launch=True,
+        _eff_s, ctx.game_progress.dl2_mb_ref, cfg=ctx.cfg, cold_launch=True,
         latency_per_mb_override=_dl2_lat_override)
     _dl_2_margin_used_ms = _dl_2_cold_margin_ms
 
@@ -14105,7 +14448,9 @@ def _run_council_search(ctx, line, move_count, dl_timeout,
             f"({'DL_1+DL_2 both hit' if _prefetch_hit else 'DL_2-only hit [G]'}): "
             f"using cached DL_2 result (no thread launch)"
         )
-    elif ctx.cfg.dl_2_enable and ctx.dl_2._alive and not mate_detected and _dl_2_time_ok:
+    elif (ctx.cfg.dl_2_enable and ctx.dl_2._alive
+          and not mate_detected and _dl_2_time_ok
+          and _dl_2_resource_gate_ok()):
         _dl_2_thread = threading.Thread(
             target=_dl_2_fetch_thread_fn,
             args=(_dl_2_fetch_params, _d2s),
@@ -14136,18 +14481,13 @@ def _run_council_search(ctx, line, move_count, dl_timeout,
         else:
             _cmate_movetime_ms = int(ctx.cfg.mate_solver_join_timeout_s * 1000)
         if ctx._zyfamate:
-            def _zf_council_worker(_mr, _sfen, _to):
-                _r, _m, _l = _zyfamate_solve(_sfen, timeout_s=_to, nodes=20000000)
-                _mr.result = _r
-                _mr.best_move = _m
-                if _r == "mate":
-                    _mr.proof = True
             try:
                 _cmate_sfen = _sfen_for_position(ctx.current_position)
                 _council_mate_thread = threading.Thread(
-                    target=_zf_council_worker,
+                    target=_zf_mate_worker,
                     args=(_council_mate_res, _cmate_sfen,
-                          max(0.1, _cmate_movetime_ms / 1000.0)),
+                          max(0.1, _cmate_movetime_ms / 1000.0),
+                          ctx.cfg.mate_solver_path),
                     daemon=True, name="zyfamate_council")
                 _council_mate_thread.start()
                 _dlog(f"[ZYFAMATE/COUNCIL] solve 並走起動 "
@@ -14180,23 +14520,23 @@ def _run_council_search(ctx, line, move_count, dl_timeout,
             _speculative_arb_holder[0] = (_speculative_arb_dl_top, ctx.current_position, _speculative_arb_dl_gap)
             _speculative_arb_dl_ready.set()
         else:
-            def _speculative_arb_dl1_bridge(_dl_th, _dl1fs_ref, _holder, _dl_ready, _stop, _pos):
+            def _speculative_arb_dl1_bridge(_dl_th, _dl1_fetch_ref, _holder, _dl_ready, _stop, _pos):
                 try:
                     _dl_th.join(timeout=30.0)
                     if _stop.is_set():
                         _dl_ready.set()
                         return
-                    if _dl1fs_ref.result is not None:
-                        _p = _dl1fs_ref.result[0]
-                        _g = (_p[0][1] - _p[1][1]) if (_p and len(_p) >= 2) else 0
-                        _holder[0] = (_p[0][0] if _p else None, _pos, _g)
+                    if _dl1_fetch_ref.result is not None:
+                        _policy = _dl1_fetch_ref.result[0]
+                        _gap = (_policy[0][1] - _policy[1][1]) if (_policy and len(_policy) >= 2) else 0
+                        _holder[0] = (_policy[0][0] if _policy else None, _pos, _gap)
                     _dl_ready.set()
                 except Exception:
                     _dl_ready.set()
 
             threading.Thread(
                 target=_speculative_arb_dl1_bridge,
-                args=(_dl_thread, _dl1fs, _speculative_arb_holder, _speculative_arb_dl_ready,
+                args=(_dl_thread, _dl1_fetch, _speculative_arb_holder, _speculative_arb_dl_ready,
                       _speculative_arb_stop, ctx.current_position),
                 daemon=True, name="speculative_arb-dl1-bridge").start()
 
@@ -14204,13 +14544,18 @@ def _run_council_search(ctx, line, move_count, dl_timeout,
             target=_speculative_arb_worker,
             args=(ctx, ctx.cfg, ctx.current_position,
                   _speculative_arb_dl_ready, _speculative_arb_stop, _speculative_arb_holder,
-                  _nnue_pv_head_depth_holder, _nnue_pv_head_event),
+                  _nnue_pv_head_depth_holder, _nnue_pv_head_event,
+                  _nnue_pv_head_lock),
             daemon=True, name="speculative_arb-worker")
         _speculative_arb_thread.start()
         _dlog("[SPARB] 投機的裁定ワーカー起動")
 
     _dl1_reserve_s = 0.0
-    if cached is None and _dl_thread is not None and _dl_thread.is_alive() and _eff_s > 0:
+    _dl1_fetch_in_flight = (cached is None
+                            and _dl_thread is not None
+                            and _dl_thread.is_alive()
+                            and _eff_s > 0)
+    if _dl1_fetch_in_flight:
         _dl1_elapsed_s = time.perf_counter() - _t_dl_submit
         _dl1_budget_left = max(0.0, dl_timeout - _dl1_elapsed_s)
         _DL1_RESERVE_RATIO = 0.30
@@ -14231,6 +14576,7 @@ def _run_council_search(ctx, line, move_count, dl_timeout,
         ctx.nnue_1, intercept_bestmove=True,
         partial_pv_depth_holder=_nnue_pv_head_depth_holder,
         pv_head_event=_nnue_pv_head_event,
+        pv_head_lock=_nnue_pv_head_lock,
         full_pv_holder=_council_full_pv_holder,
         eff_s=_relay_eff_s_final,
         go_clock=_go_clock,
@@ -14279,13 +14625,13 @@ def _run_council_search(ctx, line, move_count, dl_timeout,
                 )
         else:
             _dl_thread.join(timeout=0)
-        _dl_fetch_ms     = (round((_dl1fs.t_end - _dl1fs.t_start) * 1000)
-                            if (_dl1fs.t_start and _dl1fs.t_end) else 0)
-        _dl_lock_wait_ms = round(_dl1fs.t_lock_wait)
-        _dl_total_ms     = ((round((_dl1fs.t_end - _t_dl_submit) * 1000))
-                            if _dl1fs.t_end else
+        _dl_fetch_ms     = (round((_dl1_fetch.t_end - _dl1_fetch.t_start) * 1000)
+                            if (_dl1_fetch.t_start and _dl1_fetch.t_end) else 0)
+        _dl_lock_wait_ms = round(_dl1_fetch.t_lock_wait)
+        _dl_total_ms     = ((round((_dl1_fetch.t_end - _t_dl_submit) * 1000))
+                            if _dl1_fetch.t_end else
                             round((time.perf_counter() - _t_dl_submit) * 1000))
-        if _dl1fs.t_start:
+        if _dl1_fetch.t_start:
             _dlog(
                 f"DL fetch: lock_wait={_dl_lock_wait_ms}ms "
                 f"fetch={_dl_fetch_ms}ms total={_dl_total_ms}ms "
@@ -14293,16 +14639,16 @@ def _run_council_search(ctx, line, move_count, dl_timeout,
             )
             try:
                 if _dl_fetch_ms and _dl_fetch_ms > 50:
-                    _dlponder_nps = float(_params.get("POLICY_NODES", 2000)) / (_dl_fetch_ms / 1000.0)
+                    _dlponder_nps = float(_params["POLICY_NODES"]) / (_dl_fetch_ms / 1000.0)
                     _DLPONDER_STATE["nps_ema"] = _dlponder_ema(_DLPONDER_STATE["nps_ema"], _dlponder_nps)
                     _DLPONDER_STATE["samples"] = int(_DLPONDER_STATE.get("samples", 0)) + 1
             except Exception as _ie:
                 _flog(f"[ignored] _run_council_search: {_ie!r}")
-        if _dl1fs.result is not None:
+        if _dl1_fetch.result is not None:
             (policy, mate_detected, _dl_actual_gap, _dl_pv_lines,
-             _dl_depth_best, _dl_score_hist) = _dl1fs.result
-            ctx.gps.dl1_timeout_streak = 0
-            ctx.gps.last_dl_cont_changed = _dl1fs.cont_changed
+             _dl_depth_best, _dl_score_hist) = _dl1_fetch.result
+            ctx.game_progress.dl1_timeout_streak = 0
+            ctx.game_progress.last_dl_cont_changed = _dl1_fetch.cont_changed
             _dl1_ui_ok = False
             if policy and not _suppress_info_print and _ACTIVE_BESTMOVE_SINK is None:
                 _dl1_ui_move, _dl1_ui_score = policy[0]
@@ -14324,9 +14670,9 @@ def _run_council_search(ctx, line, move_count, dl_timeout,
                     pass
         else:
             policy, mate_detected, _dl_score_hist = [], False, {}
-            ctx.gps.last_dl_cont_changed = False
-            _streak = int(getattr(ctx.gps, "dl1_timeout_streak", 0)) + 1
-            ctx.gps.dl1_timeout_streak = _streak
+            ctx.game_progress.last_dl_cont_changed = False
+            _streak = int(getattr(ctx.game_progress, "dl1_timeout_streak", 0)) + 1
+            ctx.game_progress.dl1_timeout_streak = _streak
             _dlog(
                 f"DL fetch did not complete in time "
                 f"(lock_wait={_dl_lock_wait_ms}ms fetch={_dl_fetch_ms}ms "
@@ -14350,7 +14696,7 @@ def _run_council_search(ctx, line, move_count, dl_timeout,
     else:
         _dl_score_hist = _cache_score_hist
         _dl_depth_best = _cache_depth_best
-        ctx.gps.last_dl_cont_changed = False
+        ctx.game_progress.last_dl_cont_changed = False
 
     _dl_gap_lift_applied = bool(
         policy
@@ -14367,7 +14713,7 @@ def _run_council_search(ctx, line, move_count, dl_timeout,
         log("Mate detected by DL — switching to nnue-only mode for this game")
         _dlog("Mate detected → nnue-only mode activated")
 
-    if not ctx.endgame_mode and nnue_info["score_cp"] >= 30000:
+    if not ctx.endgame_mode and nnue_info["score_cp"] >= _MATE_CP:
         _activate_endgame(ctx, "nnue mate PV", eff_s=eff_s)
         log("Mate found in nnue PV — switching to nnue-only mode for this game")
         _dlog("Mate in nnue PV → nnue-only mode activated")
@@ -14389,7 +14735,6 @@ def _run_council_search(ctx, line, move_count, dl_timeout,
                 )
                 dl_top_vote = None
 
-    _dl_sanity_withdrawn = False
 
     _stale_withdrawn = _check_council_stale(ctx, dl_top_vote)
 
@@ -14401,7 +14746,7 @@ def _run_council_search(ctx, line, move_count, dl_timeout,
     if _dl_2_thread is not None:
 
         _CONVICTION_WAIT_SAFETY_MS = 200
-        _dl_score_for_conv = policy[0][1] if (policy and len(policy) > 0) else None
+        _dl_score_for_conv = policy[0][1] if policy else None
         _nnue_cp_for_conv  = nnue_info.get("score_cp")
         _conv_cfg = ctx.cfg
         _conviction_b = _dl_conviction_trigger_core(
@@ -14444,7 +14789,7 @@ def _run_council_search(ctx, line, move_count, dl_timeout,
                     f"safe_wait={_safe_wait_ms:.0f}ms < 50ms"
                 )
 
-            _withdraw_dl_score   = policy[0][1] if (policy and len(policy) > 0) else None
+            _withdraw_dl_score   = policy[0][1] if policy else None
             _withdraw_nnue_score = nnue_info.get("score_cp")
             if _dl_conviction_withdraw_core(
                     _withdraw_dl_score, _withdraw_nnue_score, _conv_cfg):
@@ -14455,7 +14800,6 @@ def _run_council_search(ctx, line, move_count, dl_timeout,
                     f"< threshold={_conv_cfg.dl_conviction_score_gap_cp}cp) "
                     f"— nnue override remains valid"
                 )
-                _conviction_b = False
 
         if _go_clock.remaining_ms == 0:
             if not _dl_2_thread.is_alive():
@@ -14465,10 +14809,7 @@ def _run_council_search(ctx, line, move_count, dl_timeout,
             _join_elapsed_s = (time.perf_counter() - _t_go_start)
             _join_budget_left_s = (_eff_ms / 1000.0) - _join_elapsed_s - _JOIN_SAFETY_S
             _join_budget_pos = max(0.0, _join_budget_left_s)
-            if _join_budget_pos <= ctx.cfg.dl_2_join_timeout_s:
-                _join_to_s = _join_budget_pos
-            else:
-                _join_to_s = _join_budget_pos
+            _join_to_s = _join_budget_pos
             _s8_live = _dl2_live_depth_holder[0]
             _s8_confident_agree = (dl_top_vote is not None and nnue_top_vote
                                    and dl_top_vote == nnue_top_vote)
@@ -14513,18 +14854,18 @@ def _run_council_search(ctx, line, move_count, dl_timeout,
             dl_2_top_depth       = _d2u.top_depth
             _dl_2_stability_spread = _d2u.stability_spread
             _dl_2_fetch_ms       = _d2u.fetch_ms
-            ctx.gps.dl_2_latency_ewma, ctx.gps.dl_2_latency_samples = \
+            ctx.game_progress.dl_2_latency_ewma, ctx.game_progress.dl_2_latency_samples = \
                 _update_latency_ewma(
-                    ctx.gps.dl_2_latency_ewma,
-                    ctx.gps.dl_2_latency_samples,
+                    ctx.game_progress.dl_2_latency_ewma,
+                    ctx.game_progress.dl_2_latency_samples,
                     _dl_2_fetch_ms,
-                    ctx.gps.dl2_mb_ref,
+                    ctx.game_progress.dl2_mb_ref,
                     ctx.cfg.dl_2_latency_autocal_alpha,
                 )
         elif _d2s.skipped_consensus:
             _dlog(
-                f"DL_2 not invoked (Consensus pre-launch skip) "
-                f"— DL_1==NNUE PV-head agreed"
+                "DL_2 not invoked (Consensus pre-launch skip) "
+                "— DL_1==NNUE PV-head agreed"
             )
         else:
             _dlog(
@@ -14568,7 +14909,7 @@ def _run_council_search(ctx, line, move_count, dl_timeout,
     else:
         _disagreement_score = 0
 
-    _dl_score_now  = policy[0][1] if (policy and len(policy) > 0) else None
+    _dl_score_now  = policy[0][1] if policy else None
     _nnue_score_now = nnue_info.get("score_cp")
     _score_gap_dl_nnue = (
         abs(_dl_score_now - int(_nnue_score_now))
@@ -14576,7 +14917,7 @@ def _run_council_search(ctx, line, move_count, dl_timeout,
         else None
     )
 
-    _prev_scores = ctx.gps.last_council_scores
+    _prev_scores = ctx.game_progress.last_council_scores
     _score_swing_dl = (
         abs(_dl_score_now - _prev_scores[0])
         if (_prev_scores is not None and _prev_scores[0] is not None
@@ -14643,7 +14984,7 @@ def _run_council_search(ctx, line, move_count, dl_timeout,
     )
     _boost_res = _council_apply_boost(
         _boost_dis, _eff_s, _eff_ms, _game_phase_value, cfg=ctx.cfg,
-        regime_label=ctx.gps.regime_label,
+        regime_label=ctx.game_progress.regime_label,
     )
     _arb_pre_boost_eff_s = _eff_s
     _eff_s  = _boost_res.eff_s
@@ -14654,13 +14995,13 @@ def _run_council_search(ctx, line, move_count, dl_timeout,
     _disagree_emergency_boosted = _boost_res.disagree_emergency_boosted
 
     if _disagree_eff_s_boosted or _stability_eff_s_boosted or _game_phase_surge_boosted:
-        ctx.gps.disagree_boosted_eff_s = _eff_s
-        ctx.gps.disagree_boost_emergency = _disagree_emergency_boosted
+        ctx.game_progress.disagree_boosted_eff_s = _eff_s
+        ctx.game_progress.disagree_boost_emergency = _disagree_emergency_boosted
         _dlog(f"[DISAGREE-C⑩] boosted eff_s={_eff_s:.2f}s saved to ctx → next-move DL_2 timeout"
               + (" (EMERGENCY)" if _disagree_emergency_boosted else ""))
     else:
-        ctx.gps.disagree_boosted_eff_s = None
-        ctx.gps.disagree_boost_emergency = False
+        ctx.game_progress.disagree_boosted_eff_s = None
+        ctx.game_progress.disagree_boost_emergency = False
 
     _nnue1_book_absolute = False
     if (nnue_info.get("book_info_seen")
@@ -14669,22 +15010,22 @@ def _run_council_search(ctx, line, move_count, dl_timeout,
         _nnue1_book_absolute = True
         _dlog(f"[NNUE1-BOOK] nnue_1 定跡手 (absolute) move={nnue_top_vote!r} "
               f"— council をバイパスし即採用")
-    if (ctx.gps.book_seed_move is None
-            and ctx.book2 is not None and ctx.book2._alive
+    if (ctx.game_progress.book_seed_move is None
+            and _eng_alive(ctx.book2)
             and ctx.book2_state.active and ctx.book2_state.initialized):
         _b2_move, _b2_trust = _book2_probe_seed_if_ready(ctx, ctx.current_position)
         if _b2_move:
-            ctx.gps.book_seed_move   = _b2_move
-            ctx.gps.book_seed_weight = _book_council_bias_for_trust(_b2_trust, ctx.cfg)
-            ctx.gps.book_seed_trust  = _b2_trust
+            ctx.game_progress.book_seed_move   = _b2_move
+            ctx.game_progress.book_seed_weight = _book_council_bias_for_trust(_b2_trust, ctx.cfg)
+            ctx.game_progress.book_seed_trust  = _b2_trust
             _dlog(f"[BOOK2-ASYNC] 第2 Book seed が同一手 council に合流 "
                   f"move={_b2_move!r} trust={_b2_trust} "
-                  f"weight={ctx.gps.book_seed_weight:.3f}")
+                  f"weight={ctx.game_progress.book_seed_weight:.3f}")
     _dl_2_top_vote_before_suppress = dl_2_top_vote
     _dl_1_nnue_agree_pre_council, _dl_2_suppressed, dl_2_top_vote = \
         _dl2_suppress_on_agree_core(dl_top_vote, nnue_top_vote, dl_2_top_vote)
     _p2_swing_reset = False
-    _p2_pcs = ctx.gps.last_council_scores
+    _p2_pcs = ctx.game_progress.last_council_scores
     _p2_thr = ctx.cfg.score_stability_swing_threshold_cp
     if (_p2_pcs is not None
             and ((_p2_pcs[0] is not None and _dl_score_now is not None
@@ -14692,8 +15033,8 @@ def _run_council_search(ctx, line, move_count, dl_timeout,
                  or (_p2_pcs[1] is not None and _nnue_score_now is not None
                      and abs(_nnue_score_now - _p2_pcs[1]) >= _p2_thr))):
         _p2_swing_reset = True
-    ctx.gps.council_agree_streak = (
-        (ctx.gps.council_agree_streak + 1)
+    ctx.game_progress.council_agree_streak = (
+        (ctx.game_progress.council_agree_streak + 1)
         if (_dl_1_nnue_agree_pre_council and not _p2_swing_reset) else 0)
     if _dl_2_suppressed:
         _dlog(
@@ -14720,7 +15061,7 @@ def _run_council_search(ctx, line, move_count, dl_timeout,
                 _tournament_mode, _opponent_style, ctx)
         if _game_phase_policy_dir != 0:
             _dlog(f"[GP-POL] dir={_game_phase_policy_dir:+d} (style={_opponent_id_style_eff} "
-                  f"forced={ctx.gps.opponent_id_forced_style} "
+                  f"forced={ctx.game_progress.opponent_id_forced_style} "
                   f"tournament={_tournament_mode} cp={nnue_info.get('score_cp')} "
                   f"ply={move_count} draw_ply={_draw_ply} game_phase={_game_phase_value:.3f}"
                   + (f" URGENT ε={_game_phase_policy_w:.3f}" if _game_phase_policy_urgent else "")
@@ -14738,13 +15079,12 @@ def _run_council_search(ctx, line, move_count, dl_timeout,
         _flog(f"[resign] nnue resigned (dl={dl_top_vote}) — honoring nnue resign")
     else:
 
-        _dl_3_council_used = False
 
         if (ctx.cfg.dl3_proxy_enable
                 and nnue_top_vote is not None
                 and (ctx.cfg.dl3_proxy_scope == "always"
                      or (ctx.cfg.dl3_proxy_scope == "dl2_absent" and dl_2_top_vote is None))):
-            _proxy_time_aggression_ratio = _time_aggression_dyn_ratio(_tdg.time_aggression_rescue_dyn,
+            _proxy_time_aggression_ratio = _time_aggression_dyn_ratio(_time_dyn.time_aggression_rescue_dyn,
                                             _time_aggression_base, hi=1.2)
             _proxy_wr, _dl3_proxy_meta = _dl3_nnue_proxy_wr(
                 ctx, _council_full_pv_holder[0],
@@ -14768,7 +15108,7 @@ def _run_council_search(ctx, line, move_count, dl_timeout,
             _pv_overlap_count(_dl_pv_lines, dl_top_vote, n_top=3)
             if (dl_top_vote and _dl_pv_lines) else None
         )
-        dl_score = policy[0][1] if (policy and len(policy) > 0) else None
+        dl_score = policy[0][1] if policy else None
         final_move, council_override, council_override_source = _council_vote(
             dl_top_vote, dl_2_top_vote, nnue_top_vote,
             ply=move_count, dl_top_depth=_dl_top_depth_for_vote,
@@ -14776,7 +15116,7 @@ def _run_council_search(ctx, line, move_count, dl_timeout,
             dl_pv_overlap=_dl_pv_overlap_for_vote,
             dl_top_score=dl_score,
             nnue_score_cp=nnue_info.get("score_cp"),
-            dl_2_weight_override=ctx.cfg.dl_3_council_weight if _dl_3_council_used else None,
+            dl_2_weight_override=None,
                 stale_withdraw=_stale_withdrawn,
                 win_rate_discount_holder=_win_rate_discount_h,
                 dl_2_top_score=_dl_2_score_for_vote,
@@ -14785,15 +15125,15 @@ def _run_council_search(ctx, line, move_count, dl_timeout,
                 cfg=ctx.cfg,
                 nnue_vote_weight=_proxy_nnue_weight,
                 game_phase_surge_dl_boost=ctx.cfg.game_phase_surge_dl_weight_boost if (_game_phase_surge_for_vote and ctx.cfg is not None) else 1.0,
-                book_seed_move=ctx.gps.book_seed_move,
-                book_seed_weight=ctx.gps.book_seed_weight,
+                book_seed_move=ctx.game_progress.book_seed_move,
+                book_seed_weight=ctx.game_progress.book_seed_weight,
                 game_phase_policy_dir=_game_phase_policy_dir,
                 cand_game_phase_delta=_cand_game_phase_deltas,
                 game_phase_policy_vote_weight=_game_phase_policy_w,
                 game_phase_policy_holder=_game_phase_policy_h,
         )
-        _book_seed_won = (ctx.gps.book_seed_move is not None
-                          and final_move == ctx.gps.book_seed_move)
+        _book_seed_won = (ctx.game_progress.book_seed_move is not None
+                          and final_move == ctx.game_progress.book_seed_move)
         _eff_min_diff = ctx.cfg.council_override_min_diff_cp
         _ovr_cancel_small, _ovr_abs_diff = _override_cancel_small_diff_core(
             council_override, _book_seed_won, dl_score,
@@ -14829,8 +15169,8 @@ def _run_council_search(ctx, line, move_count, dl_timeout,
     _arb_meta = None
     _arb_vote = None
     _arb_flip = False
-    _arb_seed_won = (ctx.gps.book_seed_move is not None
-                     and final_move == ctx.gps.book_seed_move)
+    _arb_seed_won = (ctx.game_progress.book_seed_move is not None
+                     and final_move == ctx.game_progress.book_seed_move)
     _arb_should_fire_now, _arb_blocked_gates = _arb_gate_core(
         ctx.cfg.arb_enable, mate_detected, council_override_source,
         _arb_seed_won, dl_top_vote, nnue_top_vote, final_move,
@@ -14914,7 +15254,7 @@ def _run_council_search(ctx, line, move_count, dl_timeout,
             and (policy[0][1] - policy[1][1]) < _TENTH_GAP_THRESHOLD_CP
             and final_move == dl_top_vote
             and _eff_s is not None and _eff_s >= 2.0
-            and ctx.nnue_1 is not None and ctx.nnue_1._alive):
+            and _eng_alive(ctx.nnue_1)):
         _tenth_alt = policy[1][0]
         if (_tenth_alt is not None and _tenth_alt not in _ARB_INVALID_VOTES
                 and _tenth_alt != final_move):
@@ -14943,13 +15283,13 @@ def _run_council_search(ctx, line, move_count, dl_timeout,
                         council_override_source = "arb0_tenth"
                         _flog(f"[ARB-TENTH] ply={move_count} consensus={dl_top_vote} "
                               f"OVERRIDDEN → {_tenth_alt} "
-                              f"(conviction={ctx.gps.regime_conviction:.2f} "
+                              f"(conviction={ctx.game_progress.regime_conviction:.2f} "
                               f"score={_tenth_run['score_cp']}cp "
                               f"Δ={_tenth_mt}ms depth={_tenth_run['depth']})")
                     else:
                         _dlog(f"[ARB-TENTH] ply={move_count} consensus={dl_top_vote} "
                               f"confirmed (alt={_tenth_alt} "
-                              f"conviction={ctx.gps.regime_conviction:.2f} "
+                              f"conviction={ctx.game_progress.regime_conviction:.2f} "
                               f"score={_tenth_run['score_cp']}cp "
                               f"Δ={_tenth_mt}ms)")
                 except Exception as _tenth_e:
@@ -14978,8 +15318,8 @@ def _run_council_search(ctx, line, move_count, dl_timeout,
         _cmate_budget_s = _move_budget_left_s(eff_s, _t_go_start)
         _cmate_join_to = ctx.cfg.mate_solver_join_timeout_s
         if eff_s > 0.0:
-            _cmate_join_to = max(0.0, min(
-                _cmate_join_to, max(_cmate_budget_s, _MATE_JOIN_GRACE_S)))
+            _cmate_join_to = _clamp(
+                max(_cmate_budget_s, _MATE_JOIN_GRACE_S), 0.0, _cmate_join_to)
         _council_mate_thread.join(timeout=_cmate_join_to)
         _council_mate_alive = _council_mate_thread.is_alive()
         _dlog(f"[MATE-COUNCIL] join timeout={_cmate_join_to:.2f}s "
@@ -14988,7 +15328,7 @@ def _run_council_search(ctx, line, move_count, dl_timeout,
               f"result={_council_mate_res.result}")
         if (_council_mate_alive and _council_mate_res.result != "mate"
                 and not ctx._zyfamate
-                and ctx.mate_solver is not None and ctx.mate_solver._alive):
+                and _eng_alive(ctx.mate_solver)):
             ctx.mate_solver.send("stop")
             _dlog("[MATE-COUNCIL] df-pn 未完 — stop 送信 (次手で drain)")
     if (_council_mate_res.result == "mate"
@@ -15138,9 +15478,9 @@ def _run_council_search(ctx, line, move_count, dl_timeout,
         try:
             _tg_sig = _board_for_position(ctx.current_position).stance_signals(move_count % 2 == 0)
             _tg_kp = ctx.cfg.tonshi_guard_kp_threshold
-            if ctx.gps.regime_label == "alert":
+            if ctx.game_progress.regime_label == _REGIME_ALERT:
                 _tg_kp = max(0, _tg_kp - _REGIME_ALERT_TONSHI_KP_REDUCE)
-            elif ctx.gps.regime_label == "crisis":
+            elif ctx.game_progress.regime_label == _REGIME_CRISIS:
                 _tg_kp = max(0, _tg_kp - _REGIME_CRISIS_TONSHI_KP_REDUCE)
             _tg_danger = (_tg_sig["in_check_self"]
                           or _tg_sig["king_pressure_self"] >= _tg_kp)
@@ -15167,7 +15507,7 @@ def _run_council_search(ctx, line, move_count, dl_timeout,
                 def _zf_tek_worker():
                     try:
                         _zf_tek_par_result[0] = _zyfamate_tesuki(
-                            _zf_tek_sfen, maxn=3, timeout_s=_zf_tek_to, nodes=1000000)
+                            _zf_tek_sfen, maxn=3, timeout_s=_zf_tek_to, nodes=1000000, path=ctx.cfg.mate_solver_path)
                     except Exception:
                         pass
                 _zf_tek_thread = threading.Thread(
@@ -15182,7 +15522,7 @@ def _run_council_search(ctx, line, move_count, dl_timeout,
                         _zf_leaf_sfen,
                         timeout_s=min(1.0, ctx.cfg.tonshi_guard_movetime_max_s,
                                       max(0.1, _move_budget_left_s(eff_s, _t_go_start))),
-                        nodes=2000000)
+                        nodes=2000000, path=ctx.cfg.mate_solver_path)
                     if _ts_hit:
                         _tg_danger = True
                         _zyfamate_tsumero_hit = True
@@ -15240,7 +15580,7 @@ def _run_council_search(ctx, line, move_count, dl_timeout,
                         _zf_leaf_sfen, maxn=3,
                         timeout_s=min(1.0, ctx.cfg.tonshi_guard_movetime_max_s,
                                       max(0.1, _move_budget_left_s(eff_s, _t_go_start))),
-                        nodes=1000000)
+                        nodes=1000000, path=ctx.cfg.mate_solver_path)
                 except Exception as _tek_e:
                     _dlog(f"[ignored] ZYFAMATE/TESUKI: {_tek_e!r}")
             if _zyfamate_tesuki_n is not None and _zyfamate_tesuki_n <= 2:
@@ -15251,7 +15591,7 @@ def _run_council_search(ctx, line, move_count, dl_timeout,
             _DLPONDER_STATE["tonshi_guard_err"] = int(_DLPONDER_STATE.get("tonshi_guard_err", 0)) + 1
             _flog(f"[ignored] TONSHI-GUARD: {_tg_e!r} (cumulative={_DLPONDER_STATE['tonshi_guard_err']})")
 
-    ctx.gps.last_tesuki_n = _zyfamate_tesuki_n
+    ctx.game_progress.last_tesuki_n = _zyfamate_tesuki_n
 
     if (not council_override
             and final_move not in (None, "", "resign", "win")
@@ -15268,8 +15608,7 @@ def _run_council_search(ctx, line, move_count, dl_timeout,
     _dl_stability_move_for_spread = dl_top_vote or (policy[0][0] if policy else None)
     _dl_stability_spread = (_score_stability(_dl_score_hist, _dl_stability_move_for_spread)
                               if (_dl_score_hist and _dl_stability_move_for_spread) else None)
-    _conf_ta_ratio = (_tdg.time_aggression_rescue_dyn / _time_aggression_base
-                      if _time_aggression_base > 1e-6 else None)
+    _conf_ta_ratio = (_ta_rescue_ratio())
     _apply_csm_and_regime(ctx, nnue_info, final_move,
                          dl_top=dl_top_vote, dl_2_top=dl_2_top_vote,
                          nnue_top=nnue_top_vote,
@@ -15285,7 +15624,7 @@ def _run_council_search(ctx, line, move_count, dl_timeout,
     _n_voices = sum(1 for v in (dl_top_vote, _dl_2_top_vote_before_suppress, nnue_top_vote) if v)
     _n_agree = sum(1 for v in (dl_top_vote, _dl_2_top_vote_before_suppress, nnue_top_vote)
                    if v and v == final_move) if _n_voices > 0 else 0
-    ctx.gps.last_child_agreement = (_n_agree / _n_voices) if _n_voices > 0 else None
+    ctx.game_progress.last_child_agreement = (_n_agree / _n_voices) if _n_voices > 0 else None
 
     final_move, ponder_move = _safe_bestmove(final_move, ponder_move, label="council",
                                              nnue_info=nnue_info)
@@ -15339,7 +15678,6 @@ def _run_council_search(ctx, line, move_count, dl_timeout,
         "dl_stability_spread": _dl_stability_spread,
         "dl_top_depth":     dl_top_depth,
         "dl_pv_overlap":    _pv_overlap_count(_dl_pv_lines, dl_top, n_top=3) if (dl_top and _dl_pv_lines) else None,
-        "dl_sanity_withdrawn": _dl_sanity_withdrawn,
         "dl_gap_lift_applied": _dl_gap_lift_applied,
         "dl_1_nnue_agree_pre_council": (
             _dl_1_nnue_agree_pre_council
@@ -15355,12 +15693,12 @@ def _run_council_search(ctx, line, move_count, dl_timeout,
         "council_winner":   final_move,
         "council_override": council_override,
         "council_override_source": council_override_source,
-        "book_seed_move":   ctx.gps.book_seed_move,
-        "book_trust":       ("absolute" if _nnue1_book_absolute
-                             else (ctx.gps.book_seed_trust or None)),
+        "book_seed_move":   ctx.game_progress.book_seed_move,
+        "book_trust":       (_TRUST_ABSOLUTE if _nnue1_book_absolute
+                             else (ctx.game_progress.book_seed_trust or None)),
         "nnue1_book":       (True if _nnue1_book_absolute else None),
-        "book_seed_won":    (None if ctx.gps.book_seed_move is None
-                             else (final_move == ctx.gps.book_seed_move)),
+        "book_seed_won":    (None if ctx.game_progress.book_seed_move is None
+                             else (final_move == ctx.game_progress.book_seed_move)),
         "council_stale_withdraw": _stale_withdrawn,
         "council_wr_discount":   (_win_rate_discount_h.value[0] if _win_rate_discount_h.value else None),
         "council_wr_dl":         (_win_rate_discount_h.value[1] if _win_rate_discount_h.value else None),
@@ -15388,9 +15726,6 @@ def _run_council_search(ctx, line, move_count, dl_timeout,
         "pv_mate_step":        _council_pv_mate_result,
         "pv_mate_source":      _council_pv_mate_source,
         "pv_mate_override":    _council_pv_mate_override,
-        "lre_result":          None,
-        "lre_wr_leaf":         None,
-        "lre_wr_root_b":       None,
         "dl3_proxy_wr_leaf":   _proxy_wr,
         "dl3_proxy_nnue_weight": _proxy_nnue_weight,
         "dl3_proxy_reason":    (_dl3_proxy_meta.get("reason") if _dl3_proxy_meta else None),
@@ -15429,15 +15764,15 @@ def _run_council_search(ctx, line, move_count, dl_timeout,
         **_gp_record_fields(_game_phase_value,
                             (_game_phase_WHAND, _game_phase_P, _game_phase_INV,
                              _game_phase_KING, _game_phase_EXPOSURE, _game_phase_PLY),
-                            ctx.gps.last_game_phase, surge=_game_phase_surge_now),
+                            ctx.game_progress.last_game_phase, surge=_game_phase_surge_now),
         "game_phase_delta_prospective": _game_phase_delta_prospective,
         "game_phase_surge_prospective": _game_phase_surge_prospective,
         "game_phase_policy_dir":    _game_phase_policy_dir,
         "game_phase_policy_fired":  _game_phase_policy_h.value,
         "game_phase_policy_urgent": _game_phase_policy_urgent,
-        "opponent_id_sample":     ctx.gps.opponent_id_last_sample,
+        "opponent_id_sample":     ctx.game_progress.opponent_id_last_sample,
         "opponent_id_style":      _opponent_id_style_eff,
-        "opponent_id_samples":    ctx.gps.opponent_id_samples,
+        "opponent_id_samples":    ctx.game_progress.opponent_id_samples,
         "dl_1_pv": ((_dl_pv_lines.get(dl_top or _dl_1_gap_top_move or final_move)
                      if _dl_pv_lines else None)),
         "nnue_pv": (_council_full_pv_holder[0] if _council_full_pv_holder and _council_full_pv_holder[0] else None),
@@ -15448,15 +15783,16 @@ def _run_council_search(ctx, line, move_count, dl_timeout,
         "regime_conviction": nnue_info.get("regime_conviction") if nnue_info else None,
         "regime_label": nnue_info.get("regime_label") if nnue_info else None,
         "regime_collapse": nnue_info.get("regime_collapse") if nnue_info else None,
+        "regime_force_crisis": nnue_info.get("regime_force_crisis") if nnue_info else None,
     })
 
     def _ms_clamp(_s):
         if _s is None:
             return None
-        return max(-3000, min(3000, int(_s)))
-    ctx.gps.last_council_scores = (_ms_clamp(_dl_score_now), _ms_clamp(_nnue_score_now))
-    ctx.gps.last_game_phase = _game_phase_value
-    ctx.gps.opponent_id_last_sample = None
+        return _clamp(int(_s), -_SCORE_CLAMP_CP, _SCORE_CLAMP_CP)
+    ctx.game_progress.last_council_scores = (_ms_clamp(_dl_score_now), _ms_clamp(_nnue_score_now))
+    ctx.game_progress.last_game_phase = _game_phase_value
+    ctx.game_progress.opponent_id_last_sample = None
 
     _opponent_id_set_pending(
         ctx, ctx.current_position, final_move,
@@ -15467,23 +15803,24 @@ def _run_council_search(ctx, line, move_count, dl_timeout,
         _position_after_move(ctx.current_position, final_move),
         ponder_move,
         move_count,
-        alt_reply=_multi_ponder_alt_reply(_dl_pv_lines, final_move, ponder_move),
+        alt_reply=_multi_ponder_alt_reply(_dl_pv_lines, final_move, ponder_move,
+            policy=policy, alt_min_gap=float(_cfg.get("SMP_Alt_Min_Gap", 0.0))),
     )
     try:
         _cnsc = nnue_info.get("score_cp", 0) or 0
         _cmpv = (_council_full_pv_holder[0] or "").split() if _council_full_pv_holder else []
-        if (_cnsc >= 30000 and _cmpv and _cmpv[0] == final_move and len(_cmpv) >= 2):
+        if (_cnsc >= _MATE_CP and _cmpv and _cmpv[0] == final_move and len(_cmpv) >= 2):
             _store_mate_pv(ctx, ctx.current_position, _cmpv)
     except Exception as _smpc_e:
         _flog(f"[ignored] council mate-PV store: {_smpc_e!r}")
-    ctx.gps.ponder_arb_pred = _ponder_arb_predict_core(
+    ctx.game_progress.ponder_arb_pred = _ponder_arb_predict_core(
         _council_full_pv_holder[0], final_move, ponder_move)
     _ponder_arb_dl_pv = _dl_pv_lines.get(final_move) if _dl_pv_lines else None
-    ctx.gps.ponder_arb_pred_dl = _ponder_arb_predict_core(
+    ctx.game_progress.ponder_arb_pred_dl = _ponder_arb_predict_core(
         " ".join(_ponder_arb_dl_pv) if _ponder_arb_dl_pv else None,
         final_move, ponder_move)
-    ctx.gps.last_nnue_score_cp = nnue_info.get("score_cp", 0) or 0
-    ctx.gps.last_nnue_mate_ply = nnue_info.get("mate_ply")
+    ctx.game_progress.last_nnue_score_cp = nnue_info.get("score_cp", 0) or 0
+    ctx.game_progress.last_nnue_mate_ply = nnue_info.get("mate_ply")
 
     if _LIVE._ready():
         _pv_think = None
@@ -15502,12 +15839,11 @@ def _run_council_search(ctx, line, move_count, dl_timeout,
     _append_move_record(ctx, _pending_move_rec)
 
 def _run_light_council_search(ctx, line, move_count, go_clock, dl_timeout_s=0.0):
-    _t_go_start = time.perf_counter()
     eff_s = go_clock.eff_s
 
     (_game_phase_WHAND, _game_phase_P, _game_phase_INV, _game_phase_KING,
      _game_phase_EXPOSURE, _game_phase_PLY) = _calc_game_phase_features(ctx.current_position)
-    _child_agreement = ctx.gps.last_child_agreement
+    _child_agreement = ctx.game_progress.last_child_agreement
     _game_phase_value = _calc_game_phase(ctx.current_position, ctx.cfg,
                                          child_agreement=_child_agreement)
     _dlog(lambda: f"[GP/LightCouncil] game_phase={_game_phase_value:.3f}")
@@ -15542,25 +15878,26 @@ def _run_light_council_search(ctx, line, move_count, go_clock, dl_timeout_s=0.0)
     _lc_prefetch_r1 = ctx.prefetch.peek_dl_1(ctx.current_position)
     if _lc_prefetch_r1 is not None and _lc_prefetch_r1[0]:
         _lc_dl1_display_policy = _lc_prefetch_r1[0]
-    if ctx.dl_3 is not None and ctx.dl_3._alive:
+    if _eng_alive(ctx.dl_3):
         _prefetch_r1, _prefetch_r2, _dl3_prefetch_res, _ = ctx.prefetch.get(ctx.current_position)
         if _dl3_prefetch_res is not None:
             _dl3_ponder_hit_result = _dl3_prefetch_res
             _dlog("[LightCouncil] DL_3 prefetch cache HIT")
-            ctx.gps.dl_3_readyok_streak = 0
+            ctx.game_progress.dl_3_readyok_streak = 0
         else:
-            ctx.gps.dl_3_readyok_streak = 0
+            ctx.game_progress.dl_3_readyok_streak = 0
 
     _apply_slow_mover(ctx.nnue_1, _nnue_1_opts,
-                      _nnue_slowmover_user_set, "SlowMover", eff_s=eff_s, cfg=ctx.cfg)
+                      ctx.cfg.nnue_slowmover_user_set, "SlowMover", eff_s=eff_s, cfg=ctx.cfg)
     _dyn_apply_nnue_threads(ctx, ctx.nnue_1, "light_council")
+    _dyn_apply_nnue_hash(ctx.nnue_1, "nnue_1")
     ctx.nnue_1.send(ctx.current_position)
     ctx.nnue_1.send(go_clock.patched_line)
 
     ctx.prefetch.cancel()
 
     if (ctx.dl_3 is not None
-            and ctx.gps.dl_3_readyok_streak >= _DL3_RESTART_STREAK_THRESHOLD):
+            and ctx.game_progress.dl_3_readyok_streak >= _DL3_RESTART_STREAK_THRESHOLD):
         _restart_child(ctx, "dl_3", "light_council")
 
     dl3_top_move = None
@@ -15569,7 +15906,7 @@ def _run_light_council_search(ctx, line, move_count, go_clock, dl_timeout_s=0.0)
     _dl3fs = Dl3FetchState()
     _dl3_thread = None
 
-    _time_aggression_rescue_ratio = _time_aggression_dyn_ratio(_tdg.time_aggression_rescue_dyn,
+    _time_aggression_rescue_ratio = _time_aggression_dyn_ratio(_time_dyn.time_aggression_rescue_dyn,
                                      _time_aggression_base, hi=1.5)
     _dl3_timeout_s = _lc_dl3_timeout_s_core(eff_s, _time_aggression_rescue_ratio, ctx.cfg)
     _dlog(lambda: f"[LightCouncil] DL3 timeout={_dl3_timeout_s*1000:.0f}ms "
@@ -15598,7 +15935,7 @@ def _run_light_council_search(ctx, line, move_count, go_clock, dl_timeout_s=0.0)
         except Exception as _e:
             _dlog(f"[LightCouncil] DL_3 fetch error: {_e}")
 
-    if ctx.dl_3 is not None and ctx.dl_3._alive and _dl3_ponder_hit_result is None:
+    if _eng_alive(ctx.dl_3) and _dl3_ponder_hit_result is None:
         _dl3_thread = threading.Thread(target=_dl3_fetch_worker, daemon=True)
         _dl3_thread.start()
 
@@ -15606,7 +15943,7 @@ def _run_light_council_search(ctx, line, move_count, go_clock, dl_timeout_s=0.0)
     _relay_timeout = min(eff_s * 3.0 + 2.0, 30.0)
     _lc_live_cb = _make_live_think_cb(ctx, "light_council", ctx.current_position,
                                       game_phase=_game_phase_value,
-                                      game_phase_delta=_calc_game_phase_delta(_game_phase_value, ctx.gps.last_game_phase))
+                                      game_phase_delta=_calc_game_phase_delta(_game_phase_value, ctx.game_progress.last_game_phase))
     ponder_move, nnue_info = relay_until_bestmove(
         ctx.nnue_1, timeout=_relay_timeout, intercept_bestmove=True,
         full_pv_holder=_lc_full_pv_holder,
@@ -15653,8 +15990,8 @@ def _run_light_council_search(ctx, line, move_count, go_clock, dl_timeout_s=0.0)
 
     _lc_nnue_vote_weight = None
     if _lc_proxy_gate_core(ctx.cfg.dl3_proxy_enable, nnue_top_vote,
-                           (ctx.dl_3 is not None and ctx.dl_3._alive),
-                           eff_s, _tdg.dl_3_rescue_eff_s_min):
+                           (_eng_alive(ctx.dl_3)),
+                           eff_s, _time_dyn.dl_3_rescue_eff_s_min):
         _lc_proxy_wr, _lc_proxy_meta = _dl3_nnue_proxy_wr(
             ctx, _lc_full_pv_holder[0], nnue_info.get("depth"), eff_s,
             time_aggression_ratio=_time_aggression_rescue_ratio)
@@ -15690,7 +16027,7 @@ def _run_light_council_search(ctx, line, move_count, go_clock, dl_timeout_s=0.0)
                 ctx.current_position, (dl3_top_move, nnue_top_vote),
                 _game_phase_value, cfg=ctx.cfg)
             _dlog(f"[GP-POL/LC] dir={_lc_game_phase_policy_dir:+d} "
-                  f"(style={_lc_opponent_id_style} forced={ctx.gps.opponent_id_forced_style} "
+                  f"(style={_lc_opponent_id_style} forced={ctx.game_progress.opponent_id_forced_style} "
                   f"tournament={_tournament_mode} cp={nnue_info.get('score_cp')}"
                   + (f" URGENT ε={_lc_game_phase_policy_w:.3f}" if _lc_game_phase_policy_urgent else "")
                   + ")")
@@ -15720,8 +16057,8 @@ def _run_light_council_search(ctx, line, move_count, go_clock, dl_timeout_s=0.0)
             game_phase=_game_phase_value,
             cfg=ctx.cfg,
             nnue_vote_weight=_lc_nnue_vote_weight,
-            book_seed_move=ctx.gps.book_seed_move,
-            book_seed_weight=ctx.gps.book_seed_weight,
+            book_seed_move=ctx.game_progress.book_seed_move,
+            book_seed_weight=ctx.game_progress.book_seed_weight,
             game_phase_policy_dir=_lc_game_phase_policy_dir,
             cand_game_phase_delta=_lc_cand_game_phase_deltas,
             game_phase_policy_vote_weight=_lc_game_phase_policy_w,
@@ -15735,13 +16072,13 @@ def _run_light_council_search(ctx, line, move_count, go_clock, dl_timeout_s=0.0)
         council_override = False
         council_override_source = None
         final_move, _lc_w_nnue, _lc_fb_reason = _lc_fallback_move_core(
-            nnue_top_vote, ctx.gps.book_seed_move, ctx.gps.book_seed_weight)
+            nnue_top_vote, ctx.game_progress.book_seed_move, ctx.game_progress.book_seed_weight)
         if _lc_fb_reason == "seed":
             _dlog(f"[LightCouncil] DL_3 absent → 定跡 seed 採用: "
-                  f"{final_move} (w={ctx.gps.book_seed_weight:.3f} > nnue {_lc_w_nnue:.1f})")
+                  f"{final_move} (w={ctx.game_progress.book_seed_weight:.3f} > nnue {_lc_w_nnue:.1f})")
         elif _lc_fb_reason == "nnue":
             _dlog(f"[LightCouncil] DL_3 absent → nnue 採用 (定跡 seed "
-                  f"{ctx.gps.book_seed_move} w={ctx.gps.book_seed_weight:.3f} <= nnue {_lc_w_nnue:.1f})")
+                  f"{ctx.game_progress.book_seed_move} w={ctx.game_progress.book_seed_weight:.3f} <= nnue {_lc_w_nnue:.1f})")
         else:
             _dlog(
                 f"[LightCouncil] DL_3 absent → nnue only: {final_move}"
@@ -15764,13 +16101,12 @@ def _run_light_council_search(ctx, line, move_count, go_clock, dl_timeout_s=0.0)
                   f"unavailable → emit without ponder (旧不整合 ponder は廃止)")
 
     _lc_mate_detected = False
-    if not ctx.endgame_mode and nnue_info.get("score_cp", 0) >= 30000:
+    if not ctx.endgame_mode and nnue_info.get("score_cp", 0) >= _MATE_CP:
         _activate_endgame(ctx, "light_council nnue mate PV", eff_s=eff_s)
         _lc_mate_detected = True
         _dlog("[LightCouncil] nnue score_cp >= 30000 → endgame_mode activated")
 
-    _lc_conf_ta = (_tdg.time_aggression_rescue_dyn / _time_aggression_base
-                   if _time_aggression_base > 1e-6 else None)
+    _lc_conf_ta = (_ta_rescue_ratio())
     _apply_csm_and_regime(ctx, nnue_info, final_move,
                          dl_2_top=dl3_top_move,
                          nnue_top=nnue_top_vote,
@@ -15784,7 +16120,6 @@ def _run_light_council_search(ctx, line, move_count, go_clock, dl_timeout_s=0.0)
     final_move, ponder_move = _safe_bestmove(final_move, ponder_move, label="light_council",
                                              nnue_info=nnue_info)
 
-    _t_elapsed = time.perf_counter() - _t_go_start
     _lc_pending_move_rec = _build_move_record({
         "ply":                  move_count,
         "dl_used":              False,
@@ -15820,12 +16155,12 @@ def _run_light_council_search(ctx, line, move_count, go_clock, dl_timeout_s=0.0)
         "council_override":     council_override,
         "council_override_source": council_override_source,
         "council_stale_withdraw": False,
-        "book_seed_move":       ctx.gps.book_seed_move,
-        "book_trust":           ("absolute" if _lc_nnue1_book_absolute
-                                 else (ctx.gps.book_seed_trust or None)),
+        "book_seed_move":       ctx.game_progress.book_seed_move,
+        "book_trust":           (_TRUST_ABSOLUTE if _lc_nnue1_book_absolute
+                                 else (ctx.game_progress.book_seed_trust or None)),
         "nnue1_book":           (True if _lc_nnue1_book_absolute else None),
-        "book_seed_won":        (None if ctx.gps.book_seed_move is None
-                                 else (final_move == ctx.gps.book_seed_move)),
+        "book_seed_won":        (None if ctx.game_progress.book_seed_move is None
+                                 else (final_move == ctx.game_progress.book_seed_move)),
         "council_wr_discount":   (_lc_wr_h.value[0] if _lc_wr_h.value else None),
         "council_wr_dl":         (_lc_wr_h.value[1] if _lc_wr_h.value else None),
         "council_wr_nnue":       (_lc_wr_h.value[2] if _lc_wr_h.value else None),
@@ -15842,7 +16177,6 @@ def _run_light_council_search(ctx, line, move_count, go_clock, dl_timeout_s=0.0)
         "ctx.endgame_mode":       ctx.endgame_mode,
         "go_line":              line,
         "source":               "light_council",
-        "dl_sanity_withdrawn":    False,
         "mate_solver_invoked":    False,
         "mate_solver_result":     None,
         "mate_solver_move":       None,
@@ -15855,26 +16189,27 @@ def _run_light_council_search(ctx, line, move_count, go_clock, dl_timeout_s=0.0)
         **_gp_record_fields(_game_phase_value,
                             (_game_phase_WHAND, _game_phase_P, _game_phase_INV,
                              _game_phase_KING, _game_phase_EXPOSURE, _game_phase_PLY),
-                            ctx.gps.last_game_phase),
+                            ctx.game_progress.last_game_phase),
         "nnue_pv": (_lc_full_pv_holder[0] if _lc_full_pv_holder[0] else None),
         "dl_display_policy": (_lc_dl1_display_policy if _lc_dl1_display_policy else None),
         "game_phase_policy_dir":    _lc_game_phase_policy_dir,
         "game_phase_policy_fired":  _lc_game_phase_policy_h.value,
         "game_phase_policy_urgent": _lc_game_phase_policy_urgent,
-        "opponent_id_sample":     ctx.gps.opponent_id_last_sample,
+        "opponent_id_sample":     ctx.game_progress.opponent_id_last_sample,
         "opponent_id_style":      _lc_opponent_id_style,
-        "opponent_id_samples":    ctx.gps.opponent_id_samples,
+        "opponent_id_samples":    ctx.game_progress.opponent_id_samples,
         "confidence": nnue_info.get("confidence") if nnue_info else None,
         "sharpness": nnue_info.get("sharpness") if nnue_info else None,
         "momentum": nnue_info.get("momentum") if nnue_info else None,
         "regime_conviction": nnue_info.get("regime_conviction") if nnue_info else None,
         "regime_label": nnue_info.get("regime_label") if nnue_info else None,
         "regime_collapse": nnue_info.get("regime_collapse") if nnue_info else None,
+        "regime_force_crisis": nnue_info.get("regime_force_crisis") if nnue_info else None,
     })
 
-    ctx.gps.opponent_id_last_sample = None
+    ctx.game_progress.opponent_id_last_sample = None
 
-    ctx.gps.last_game_phase = _game_phase_value
+    ctx.game_progress.last_game_phase = _game_phase_value
 
     _lc_suppress, _lc_threshold_s = _lc_prefetch_gate_core(dl_timeout_s, ctx.cfg)
     if not _lc_suppress:
@@ -15890,8 +16225,8 @@ def _run_light_council_search(ctx, line, move_count, go_clock, dl_timeout_s=0.0)
             f"→ next go も Light Council)"
         )
 
-    ctx.gps.last_nnue_score_cp = nnue_info.get("score_cp", 0) or 0
-    ctx.gps.last_nnue_mate_ply = nnue_info.get("mate_ply")
+    ctx.game_progress.last_nnue_score_cp = nnue_info.get("score_cp", 0) or 0
+    ctx.game_progress.last_nnue_mate_ply = nnue_info.get("mate_ply")
     _push_nnue_root(ctx, nnue_top_vote)
 
     if _LIVE._ready():
@@ -15907,14 +16242,14 @@ def _run_light_council_search(ctx, line, move_count, go_clock, dl_timeout_s=0.0)
     nnue_info["bestmove"] = final_move
 
     _lc_dl3_agree = (dl3_top_move is not None and dl3_top_move == nnue_top_vote)
-    ctx.gps.council_agree_streak = (
-        (ctx.gps.council_agree_streak + 1) if _lc_dl3_agree else 0)
+    ctx.game_progress.council_agree_streak = (
+        (ctx.game_progress.council_agree_streak + 1) if _lc_dl3_agree else 0)
     _lc_voices = sum(1 for v in (dl3_top_move, nnue_top_vote) if v)
     _lc_agree_n = sum(1 for v in (dl3_top_move, nnue_top_vote) if v and v == final_move) if _lc_voices else 0
-    ctx.gps.last_child_agreement = (_lc_agree_n / _lc_voices) if _lc_voices > 0 else None
-    ctx.gps.last_council_scores = (
-        max(-3000, min(3000, int(_dl3_top_score))) if _dl3_top_score is not None else None,
-        max(-3000, min(3000, int(nnue_info.get("score_cp", 0) or 0))))
+    ctx.game_progress.last_child_agreement = (_lc_agree_n / _lc_voices) if _lc_voices > 0 else None
+    ctx.game_progress.last_council_scores = (
+        _clamp(int(_dl3_top_score), -_SCORE_CLAMP_CP, _SCORE_CLAMP_CP) if _dl3_top_score is not None else None,
+        _clamp(int(nnue_info.get("score_cp", 0) or 0), -_SCORE_CLAMP_CP, _SCORE_CLAMP_CP))
     _lc_dl_pv_lines = None
     try:
         if _dl3fs is not None and _dl3fs.result:
@@ -15927,11 +16262,11 @@ def _run_light_council_search(ctx, line, move_count, go_clock, dl_timeout_s=0.0)
         dl_pred=_override_ponder_core(
             final_move,
             _lc_dl_pv_lines if isinstance(_lc_dl_pv_lines, dict) else None))
-    ctx.gps.ponder_arb_pred = _ponder_arb_predict_core(
+    ctx.game_progress.ponder_arb_pred = _ponder_arb_predict_core(
         _lc_full_pv_holder[0], final_move, ponder_move)
     _lc_ponder_arb_dl_pv = (_lc_dl_pv_lines.get(final_move)
                          if isinstance(_lc_dl_pv_lines, dict) else None)
-    ctx.gps.ponder_arb_pred_dl = _ponder_arb_predict_core(
+    ctx.game_progress.ponder_arb_pred_dl = _ponder_arb_predict_core(
         " ".join(_lc_ponder_arb_dl_pv) if _lc_ponder_arb_dl_pv else None,
         final_move, ponder_move)
 
@@ -15954,12 +16289,14 @@ def _run_mate_solver_thread(ctx, position_cmd, go_cmd,
             return
         ctx.mate_solver.send(position_cmd)
         ctx.mate_solver.send(go_cmd)
-        _readline_timeout = (max(5.0, min(120.0, eff_s * 2.0))
+        _readline_timeout = (_clamp(eff_s * 2.0, 5.0, 120.0)
                              if eff_s > 0 else 120.0)
         _max_iters = 100000
+        _proc_died = False
         for _i in range(_max_iters):
             _out = ctx.mate_solver.readline(timeout=_readline_timeout)
             if _out is None:
+                _proc_died = True
                 break
             if not _out:
                 continue
@@ -16008,6 +16345,7 @@ def _run_mate_solver_thread(ctx, position_cmd, go_cmd,
                   f"iterations without bestmove — aborting")
             mate_res.result = "busy"
         if (go_cmd.startswith("go mate") and mate_res.result is None
+                and not _proc_died
                 and getattr(ctx, "_mate_go_mate_ok", None) is None):
             _n = getattr(ctx, "_mate_go_mate_silent", 0) + 1
             ctx._mate_go_mate_silent = _n
@@ -16032,11 +16370,21 @@ _CSA_DROP_TO_USI = {'FU': 'P', 'KY': 'L', 'KE': 'N', 'GI': 'S',
                      'KI': 'G', 'KA': 'B', 'HI': 'R'}
 _CSA_PROMOTED = frozenset(('TO', 'NY', 'NK', 'NG', 'UM', 'RY'))
 
+_CSA_ROW = _CSA_RANK_TO_USI
+_CSA_TO_USI_PIECE = {
+    "FU": "P", "KY": "L", "KE": "N", "GI": "S", "KI": "G", "KA": "B", "HI": "R", "OU": "K",
+    "TO": "+P", "NY": "+L", "NK": "+N", "NG": "+S", "UM": "+B", "RY": "+R",
+}
+
 
 def _sfen_piece_promoted(sfen, file, rank):
-    _bp = sfen.split()[0] if ' ' in sfen else sfen
+    _toks = sfen.split()
+    if _toks and _toks[0] == 'sfen' and len(_toks) >= 2:
+        _bp = _toks[1]
+    else:
+        _bp = _toks[0] if _toks else ''
     _ranks = _bp.split('/')
-    if rank < 1 or rank > 9 or file < 1 or file > 9:
+    if not (1 <= rank <= 9 and 1 <= file <= 9):
         return None
     _rs = _ranks[rank - 1]
     _col = 0
@@ -16084,10 +16432,19 @@ def _sfen_for_position(position_cmd):
     return _board_for_position(position_cmd).sfen()
 
 
-def _zyfamate_solve(sfen, timeout_s=30.0, nodes=20000000):
+def _zf_mate_worker(mr, sfen, timeout_s, path=None):
+    r, m, _ = _zyfamate_solve(sfen, timeout_s=timeout_s, nodes=20000000, path=path)
+    mr.result = r
+    mr.best_move = m
+    if r == "mate":
+        mr.proof = True
+
+
+def _zyfamate_solve(sfen, timeout_s=30.0, nodes=20000000, path=None):
+    _path = path or _mate_solver_path
     try:
         _r = subprocess.run(
-            [_mate_solver_path, "sfen", sfen, str(nodes), str(timeout_s)],
+            [_path, "sfen", sfen, str(nodes), str(timeout_s)],
             capture_output=True, timeout=timeout_s + 2,
             creationflags=_ZF_CREATE_FLAGS,
         )
@@ -16111,10 +16468,11 @@ def _zyfamate_solve(sfen, timeout_s=30.0, nodes=20000000):
         return "busy", None, 0
 
 
-def _zyfamate_tsumero(sfen, timeout_s=10.0, nodes=5000000):
+def _zyfamate_tsumero(sfen, timeout_s=10.0, nodes=5000000, path=None):
+    _path = path or _mate_solver_path
     try:
         _r = subprocess.run(
-            [_mate_solver_path, "sfen-tsumero", sfen, str(nodes), str(timeout_s)],
+            [_path, "sfen-tsumero", sfen, str(nodes), str(timeout_s)],
             capture_output=True, timeout=timeout_s + 2,
             creationflags=_ZF_CREATE_FLAGS,
         )
@@ -16137,10 +16495,11 @@ def _zyfamate_tsumero(sfen, timeout_s=10.0, nodes=5000000):
         return False, 0, ""
 
 
-def _zyfamate_tesuki(sfen, maxn=3, timeout_s=3.0, nodes=2000000):
+def _zyfamate_tesuki(sfen, maxn=3, timeout_s=3.0, nodes=2000000, path=None):
+    _path = path or _mate_solver_path
     try:
         _r = subprocess.run(
-            [_mate_solver_path, "sfen-tesuki", sfen, str(maxn), str(nodes), str(timeout_s)],
+            [_path, "sfen-tesuki", sfen, str(maxn), str(nodes), str(timeout_s)],
             capture_output=True, timeout=timeout_s + 2,
             creationflags=_ZF_CREATE_FLAGS,
         )
@@ -16164,7 +16523,7 @@ def _zyfamate_tesuki(sfen, maxn=3, timeout_s=3.0, nodes=2000000):
 def _mate_solver_active(ctx):
     if ctx._zyfamate:
         return True
-    return ctx.mate_solver is not None and ctx.mate_solver._alive
+    return _eng_alive(ctx.mate_solver)
 
 
 def _run_single_pv_mate_check(ctx, position_cmd, go_cmd, eff_s,
@@ -16193,15 +16552,13 @@ def _run_single_pv_mate_check(ctx, position_cmd, go_cmd, eff_s,
             _dlog(f"[ZYFAMATE] sfen extraction failed ({label}): {_zf_e!r}")
             return "busy", None
         _zf_res, _zf_mv, _zf_len = _zyfamate_solve(
-            _zf_sfen, timeout_s=max(0.1, join_timeout_s), nodes=20000000)
+            _zf_sfen, timeout_s=max(0.1, join_timeout_s), nodes=20000000, path=ctx.cfg.mate_solver_path)
         if _zf_res == "nomate":
             _cache[position_cmd] = (None, "nomate")
-            if len(_cache) > 8192:
-                _cache.popitem(last=False)
+            _cache_trim(_cache)
         elif _zf_res == "mate" and _zf_mv and ctx.cfg.mate_cache_bidirectional:
             _cache[position_cmd] = (_zf_mv, "mate")
-            if len(_cache) > 8192:
-                _cache.popitem(last=False)
+            _cache_trim(_cache)
             _dlog(f"[ZYFAMATE] solve ({label}): mate in {_zf_len}, move={_zf_mv}")
         return _zf_res, _zf_mv
     _mr = MateResult()
@@ -16213,18 +16570,16 @@ def _run_single_pv_mate_check(ctx, position_cmd, go_cmd, eff_s,
     _th.start()
     _th.join(timeout=join_timeout_s)
     if _th.is_alive():
-        if ctx.mate_solver is not None and ctx.mate_solver._alive:
+        if _eng_alive(ctx.mate_solver):
             ctx.mate_solver.send("stop")
         _dlog(f"[PV-MATE] {label}: join timeout — stop sent")
         return "timeout", None
     if _mr.result == "nomate" and getattr(_mr, "proof", False):
         _cache[position_cmd] = (None, "nomate")
-        if len(_cache) > 8192:
-            _cache.popitem(last=False)
+        _cache_trim(_cache)
     elif _mr.result == "mate" and _mr.best_move and ctx.cfg.mate_cache_bidirectional:
         _cache[position_cmd] = (_mr.best_move, "mate")
-        if len(_cache) > 8192:
-            _cache.popitem(last=False)
+        _cache_trim(_cache)
         _dlog(f"[MATE-CACHE] stored mate proof ({label}) move={_mr.best_move}")
     return _mr.result, _mr.best_move
 
@@ -16242,10 +16597,10 @@ def _collect_pv_mate_sources(ctx, nnue_full_pv, eff_s):
         if _mv:
             _sources.append(("nnue2", _mv))
 
-    if _want_dl3 and ctx.dl_3 is not None and ctx.dl_3._alive:
+    if _want_dl3 and _eng_alive(ctx.dl_3):
         try:
             _PV_MATE_NODES_FLOOR = 32
-            _pv_mate_time_aggression_ratio = _time_aggression_dyn_ratio(_tdg.time_aggression_rescue_dyn,
+            _pv_mate_time_aggression_ratio = _time_aggression_dyn_ratio(_time_dyn.time_aggression_rescue_dyn,
                                               _time_aggression_base, hi=1.5)
             _nodes_base = ctx.cfg.pv_mate_dl3_nodes if ctx.cfg.pv_mate_dl3_nodes > 0 else _dl_3_effective_nodes
             _nodes = max(_PV_MATE_NODES_FLOOR, int(round(_nodes_base * _pv_mate_time_aggression_ratio)))
@@ -16318,7 +16673,7 @@ def _mate_ponder_due_core(enable, solver_alive, last_score_cp, game_phase, min_g
                           opponent_s_ema, min_opp_s):
     if not enable or not solver_alive:
         return False
-    if last_score_cp is not None and last_score_cp >= 30000:
+    if last_score_cp is not None and last_score_cp >= _MATE_CP:
         return False
     if game_phase is not None and min_game_phase > 0.0 and game_phase < min_game_phase:
         return False
@@ -16331,12 +16686,19 @@ def _mate_ponder_movetime_core(ponder_eff_s, join_timeout_s):
         _base = _jt
     else:
         _base = float(ponder_eff_s) * 3.0 + 5.0
-    return int(round(max(_jt, min(120.0, _base)) * 1000.0))
+    return int(round(_clamp(_base, _jt, 120.0) * 1000.0))
 
 
 def _mate_ponder_harvest_core(rec, position_cmd):
     if rec is None:
         return ("empty", None)
+    if isinstance(rec, list):
+        if not rec:
+            return ("empty", None)
+        for _r in rec:
+            if _r[0] == position_cmd:
+                return ("hit", (_r[1], _r[2], _r[3]))
+        return ("miss", None)
     if rec[0] != position_cmd:
         return ("miss", None)
     return ("hit", (rec[1], rec[2], rec[3]))
@@ -16358,22 +16720,24 @@ def _mate_ponder_harvest(ctx, position_cmd):
     return _payload
 
 
-def _mate_ponder_worker(ctx, pos, movetime_ms, cancel_ev):
+def _mate_ponder_worker(ctx, pos, movetime_ms, cancel_ev, alt_pos=None):
     try:
         if cancel_ev.is_set():
             return
+        _t0 = time.perf_counter()
         _go = _mate_go_cmd(ctx, int(movetime_ms))
         _res, _bm = _run_single_pv_mate_check(
             ctx, pos, _go, 0.0, movetime_ms / 1000.0 + 3.0, "mate-ponder")
+        _results = []
         if _res == "mate" and _bm not in (None, "", "resign", "win"):
-            ctx._mate_ponder_result = (pos, "mate", _bm, True)
+            _results.append((pos, "mate", _bm, True))
             _DLPONDER_STATE["mpon_mate"] = int(_DLPONDER_STATE.get("mpon_mate", 0)) + 1
             _flog(f"[MPON] 予測局面に詰みを発見: {_bm} "
                   "(ponderhit 時に検問つき即採用候補)")
         elif _res == "nomate":
             _cache = getattr(ctx, "_mate_nomate_cache", None)
             _proven = bool(_cache is not None and pos in _cache)
-            ctx._mate_ponder_result = (pos, "nomate", None, _proven)
+            _results.append((pos, "nomate", None, _proven))
             if _proven:
                 _DLPONDER_STATE["mpon_nomate_proof"] = \
                     int(_DLPONDER_STATE.get("mpon_nomate_proof", 0)) + 1
@@ -16381,6 +16745,30 @@ def _mate_ponder_worker(ctx, pos, movetime_ms, cancel_ev):
                   + (" — 自分番の現局面チェックを省略可" if _proven else ""))
         else:
             _dlog(f"[MPON] 結果 {_res} — 未証明のため記録なし")
+        if alt_pos and not cancel_ev.is_set() and _results:
+            _elapsed_ms = (time.perf_counter() - _t0) * 1000.0
+            _opp_ema = _DLPONDER_STATE.get("opponent_s_ema")
+            if isinstance(_opp_ema, (int, float)) and _opp_ema > 0:
+                _remaining_ms = max(0, _opp_ema * 1000.0 - _elapsed_ms)
+                _alt_mt_ms = min(_remaining_ms * 0.5, movetime_ms * 0.5)
+                if _alt_mt_ms >= 100:
+                    _go_a = _mate_go_cmd(ctx, int(_alt_mt_ms))
+                    _res_a, _bm_a = _run_single_pv_mate_check(
+                        ctx, alt_pos, _go_a, 0.0,
+                        _alt_mt_ms / 1000.0 + 3.0, "mate-ponder-alt")
+                    if _res_a == "mate" and _bm_a not in (None, "", "resign", "win"):
+                        _results.append((alt_pos, "mate", _bm_a, True))
+                        _DLPONDER_STATE["mpon_mate"] = int(_DLPONDER_STATE.get("mpon_mate", 0)) + 1
+                        _flog(f"[MPON-ALT] alt 予測局面に詰みを発見: {_bm_a}")
+                    elif _res_a == "nomate":
+                        _ca = getattr(ctx, "_mate_nomate_cache", None)
+                        _pa = bool(_ca is not None and alt_pos in _ca)
+                        _results.append((alt_pos, "nomate", None, _pa))
+                        if _pa:
+                            _DLPONDER_STATE["mpon_nomate_proof"] = \
+                                int(_DLPONDER_STATE.get("mpon_nomate_proof", 0)) + 1
+                        _dlog(f"[MPON-ALT] alt 予測局面は不詰 (proven={_pa})")
+        ctx._mate_ponder_result = _results if _results else None
     except (KeyboardInterrupt, SystemExit, MemoryError):
         raise
     except Exception as _e:
@@ -16396,7 +16784,7 @@ def _mate_ponder_worker(ctx, pos, movetime_ms, cancel_ev):
 
 
 def _mate_solver_stop_safe(ctx, label: str) -> bool:
-    if ctx.mate_solver is None or not ctx.mate_solver._alive:
+    if not _eng_alive(ctx.mate_solver):
         return True
     try:
         ctx.mate_solver.send("stop")
@@ -16440,7 +16828,7 @@ def _mate_ponder_dispatch(ctx, go_ponder_clock_arg, cur_game_phase, label="go-po
         if not _mate_ponder_due_core(
                 ctx.cfg.mate_ponder_enable,
                 _mate_solver_active(ctx),
-                getattr(ctx.gps, "last_nnue_score_cp", None),
+                getattr(ctx.game_progress, "last_nnue_score_cp", None),
                 cur_game_phase, _endgame_mate_ponder_game_phase,
                 _DLPONDER_STATE.get("opponent_s_ema"),
                 float(_cfg.get("DLP_Ponder_Min_Opp_S", 1.5))):
@@ -16461,8 +16849,9 @@ def _mate_ponder_dispatch(ctx, go_ponder_clock_arg, cur_game_phase, label="go-po
         _ev = threading.Event()
         ctx._mate_ponder_cancel = _ev
         ctx._mate_ponder_pos = _pos
+        _alt = getattr(ctx.ps, "dl2_ponder_pos", None) if _multi_ponder_enable else None
         _th = threading.Thread(
-            target=_mate_ponder_worker, args=(ctx, _pos, _mt_ms, _ev),
+            target=_mate_ponder_worker, args=(ctx, _pos, _mt_ms, _ev, _alt),
             daemon=True, name="mate_ponder")
         ctx._mate_ponder_thread = _th
         _th.start()
@@ -16496,12 +16885,12 @@ def _emergency_move_from_any_engine(ctx, eff_s):
     _revive_dead_nnue_async(ctx, eff_s)
 
     _nodes   = _dl_3_effective_nodes
-    _timeout = max(1.0, min(eff_s if eff_s else 3.0, 5.0))
-    _cb = _get_tracking_board(ctx)
+    _timeout = _clamp(eff_s if eff_s else 3.0, 1.0, 5.0)
+    _board = _get_tracking_board(ctx)
 
     _engines = [("dl_1", ctx.dl_1), ("dl_2", ctx.dl_2), ("dl_3", ctx.dl_3)]
     for _name, _eng in _engines:
-        if _eng is None or not getattr(_eng, "_alive", False):
+        if _eng is None or not _eng_alive(_eng):
             continue
         try:
             _r = fetch_dl_policy(
@@ -16517,13 +16906,13 @@ def _emergency_move_from_any_engine(ctx, eff_s):
         _mv = _r[0][0][0]
         if _mv in (None, "", "resign", "win"):
             continue
-        if _cb is not None:
+        if _board is not None:
             try:
-                if _cb.usi_to_csa(_mv) == "":
+                if _board.usi_to_csa(_mv) == "":
                     _flog(f"[EMERGENCY-DIAG] {_name} move {_mv} flagged illegal by "
                           f"orchestrator board (likely orchestrator board desync); "
                           f"trusting child and emitting as-is")
-                elif _cb.is_perpetual_check_move(_mv):
+                elif _board.is_perpetual_check_move(_mv):
                     _flog(f"[EMERGENCY-DIAG] {_name} move {_mv} flagged perpetual-check; "
                           f"trusting child and emitting as-is")
             except Exception as _ed:
@@ -16545,21 +16934,21 @@ def _wait_revive_nnue_and_move(ctx, caller="emergency", deadline_s=None):
     _readyok_to = max(_cs_floor, _budget * 0.5)
     _move_ms = int(max(int(_move_overhead_ms), (_budget - _readyok_to) * 1000))
 
-    _cb = _get_tracking_board(ctx)
+    _board = _get_tracking_board(ctx)
 
     for _slot, _eng, _restart, _opts in (
         ("nnue_1", ctx.nnue_1, _restart_nnue_1, _nnue_1_opts),
     ):
         if _eng is None:
             continue
-        if not getattr(_eng, "_alive", False):
+        if not _eng_alive(_eng):
             try:
                 _ok = _restart(ctx, f"{caller}/wait-revive",
                                readyok_timeout=_readyok_to, async_launch=False)
             except Exception as _re:
                 _flog(f"[WAIT-REVIVE] {_slot} restart raised: {_re}")
                 continue
-            if not _ok or not getattr(_eng, "_alive", False):
+            if not _ok or not _eng_alive(_eng):
                 _flog(f"[WAIT-REVIVE] {_slot} did not come back — trying next")
                 continue
             _flog(f"[WAIT-REVIVE] {_slot} revived synchronously — searching this move")
@@ -16577,12 +16966,12 @@ def _wait_revive_nnue_and_move(ctx, caller="emergency", deadline_s=None):
         if _mv in (None, "", "resign", "win"):
             _flog(f"[WAIT-REVIVE] {_slot} returned no usable move — trying next")
             continue
-        if _cb is not None:
+        if _board is not None:
             try:
-                if _cb.usi_to_csa(_mv) == "":
+                if _board.usi_to_csa(_mv) == "":
                     _flog(f"[WAIT-REVIVE-DIAG] {_slot} move {_mv} flagged illegal by "
                           f"orchestrator board; trusting child and emitting as-is")
-                elif _cb.is_perpetual_check_move(_mv):
+                elif _board.is_perpetual_check_move(_mv):
                     _flog(f"[WAIT-REVIVE-DIAG] {_slot} move {_mv} flagged perpetual-check; "
                           f"trusting child and emitting as-is")
             except Exception as _ie:
@@ -16679,7 +17068,7 @@ _INFINITE_COUNCIL_EFF_S      = 5.0
 
 def _run_infinite_council(ctx, eng, move_count):
     position = ctx.current_position
-    _n = _params.get("POLICY_MOVES", 9)
+    _n = _params["POLICY_MOVES"]
     _nodes = _calc_dynamic_policy_nodes(_INFINITE_COUNCIL_EFF_S, cfg=ctx.cfg)
     _game_phase = _calc_game_phase(position, cfg=ctx.cfg)
     _latest_nnue = {"move": None, "score_cp": 0, "depth": 0}
@@ -16689,7 +17078,7 @@ def _run_infinite_council(ctx, eng, move_count):
     def _council_cycle():
         if _stop_event.is_set():
             return
-        if ctx.dl_1 is None or not ctx.dl_1._alive:
+        if not _eng_alive(ctx.dl_1):
             return
         nnue_move = _latest_nnue["move"]
         if not nnue_move:
@@ -16715,7 +17104,7 @@ def _run_infinite_council(ctx, eng, move_count):
         dl_top_score = policy[0][1]
         dl_2_top = None
         dl_2_top_score = None
-        if ctx.dl_2 is not None and ctx.dl_2._alive:
+        if _eng_alive(ctx.dl_2):
             try:
                 with ctx.dl_2_lock:
                     _raw2 = fetch_dl_policy(
@@ -16731,7 +17120,7 @@ def _run_infinite_council(ctx, eng, move_count):
                 raise
             except Exception:
                 pass
-        elif ctx.dl_3 is not None and ctx.dl_3._alive:
+        elif _eng_alive(ctx.dl_3):
             try:
                 with ctx.dl_3_lock:
                     _raw3 = fetch_dl_policy(
@@ -16803,7 +17192,7 @@ def _run_infinite_council(ctx, eng, move_count):
                 break
             if not out:
                 continue
-            if out.startswith("info") and "depth" in out and "score" in out:
+            if _is_scored_info(out):
                 _dm = _RE_DEPTH.search(out)
                 if _dm:
                     _d = int(_dm.group(1))
@@ -16849,8 +17238,10 @@ def _run_endgame_search(ctx, line, move_count, is_infinite,
                           go_clock=None):
     _dl_veto_applied = False
     _veto_meta = None
+    _eg_arb_vote = None
+    _eg_arb_meta = None
     if go_clock is None and not is_infinite:
-        go_clock = _parse_go_clock(line, move_count, score_cp=ctx.gps.last_nnue_score_cp)
+        go_clock = _parse_go_clock(line, move_count, score_cp=ctx.game_progress.last_nnue_score_cp, cfg=ctx.cfg)
     eff_s = go_clock.eff_s if (go_clock is not None and not is_infinite) else 0.0
     _t_go_start = time.perf_counter()
 
@@ -16872,7 +17263,7 @@ def _run_endgame_search(ctx, line, move_count, is_infinite,
 
     (_game_phase_WHAND, _game_phase_P, _game_phase_INV, _game_phase_KING,
      _game_phase_EXPOSURE, _game_phase_PLY) = _calc_game_phase_features(ctx.current_position)
-    _child_agreement = ctx.gps.last_child_agreement
+    _child_agreement = ctx.game_progress.last_child_agreement
     _game_phase_value = _calc_game_phase(ctx.current_position, ctx.cfg,
                                          child_agreement=_child_agreement)
     _dlog(lambda: f"[GP/Endgame] game_phase={_game_phase_value:.3f}")
@@ -16906,8 +17297,8 @@ def _run_endgame_search(ctx, line, move_count, is_infinite,
             if ctx.nnue_1._alive and ctx.ps.active:
                 _flog("_run_endgame_search: nnue_1 is pondering — sending stop")
                 ctx.nnue_1.send("stop")
-                _eg_drain_to = min(2.0, max(0.3,
-                    go_clock.eff_s * 0.3 if go_clock else 2.0))
+                _eg_drain_to = _clamp(
+                    go_clock.eff_s * 0.3 if go_clock else 2.0, 0.3, 2.0)
                 relay_until_bestmove(ctx.nnue_1, intercept_bestmove=True,
                                      timeout=_eg_drain_to, kill_on_empty=False)
                 ctx.ps.active = False
@@ -16915,14 +17306,14 @@ def _run_endgame_search(ctx, line, move_count, is_infinite,
     if not is_infinite:
         if use_dedicated:
             _apply_slow_mover(eng, _endgame_opts,
-                              _nnue_2_slowmover_user_set, "ctx.nnue_2",
+                              ctx.cfg.nnue_2_slowmover_user_set, "ctx.nnue_2",
                               go_clock=go_clock, cfg=ctx.cfg)
         else:
             _apply_slow_mover(eng, _nnue_1_opts,
-                              _nnue_slowmover_user_set, "ctx.nnue_1",
+                              ctx.cfg.nnue_slowmover_user_set, "ctx.nnue_1",
                               go_clock=go_clock, cfg=ctx.cfg)
 
-    if not is_infinite and not getattr(eng, "_alive", False):
+    if not is_infinite and not _eng_alive(eng):
         _flog(f"[EMERGENCY] selected engine {getattr(eng, 'name', '?')} is dead — "
               f"delegating to a surviving engine before relay")
         _emerg = None
@@ -16941,6 +17332,7 @@ def _run_endgame_search(ctx, line, move_count, is_infinite,
 
     if not is_infinite:
         _dyn_apply_nnue_threads(ctx, eng, "endgame")
+        _dyn_apply_nnue_hash(eng, "nnue_2" if use_dedicated else "nnue_1")
     eng.send(ctx.current_position)
     _nnue_patched = (go_clock.patched_line if go_clock is not None else line)
     eng.send(_nnue_patched if not is_infinite else line)
@@ -16979,7 +17371,7 @@ def _run_endgame_search(ctx, line, move_count, is_infinite,
                 ctx._zyfamate
                 or use_dedicated
                 or (ctx.endgame_mode and not _endgame_separate)
-                or (ctx.gps.last_nnue_score_cp >= 30000 and use_dedicated)
+                or (ctx.game_progress.last_nnue_score_cp >= _MATE_CP and use_dedicated)
             )
         )
         if (not _mate_solver_should_run and ctx.cfg.mate_solver_min_eff_s > 0.0
@@ -17009,12 +17401,6 @@ def _run_endgame_search(ctx, line, move_count, is_infinite,
                 _mate_movetime_ms = max(
                     50, min(_mate_movetime_ms, int(_mate_budget_left_s * 1000)))
             if ctx._zyfamate:
-                def _zf_solve_worker(_mr, _sfen, _to):
-                    _r, _m, _l = _zyfamate_solve(_sfen, timeout_s=_to, nodes=20000000)
-                    _mr.result = _r
-                    _mr.best_move = _m
-                    if _r == "mate":
-                        _mr.proof = True
                 _zf_timeout = max(0.1, _mate_movetime_ms / 1000.0)
                 try:
                     _zf_sfen = _sfen_for_position(ctx.current_position)
@@ -17023,8 +17409,9 @@ def _run_endgame_search(ctx, line, move_count, is_infinite,
                     _zf_sfen = None
                 if _zf_sfen:
                     _mate_thread = threading.Thread(
-                        target=_zf_solve_worker,
-                        args=(_mate_res, _zf_sfen, _zf_timeout),
+                        target=_zf_mate_worker,
+                        args=(_mate_res, _zf_sfen, _zf_timeout,
+                              ctx.cfg.mate_solver_path),
                         daemon=True, name="zyfamate_solver"
                     )
                     _mate_thread.start()
@@ -17050,21 +17437,28 @@ def _run_endgame_search(ctx, line, move_count, is_infinite,
         _pv_intercept = (
             eff_s >= ctx.cfg.pv_mate_min_eff_s
         )
-        if (eff_s is not None and eff_s >= ctx.cfg.endgame_dl_veto_min_eff_s
-                and ((ctx.cfg.endgame_dl_veto_use_dl1 and ctx.dl_1 is not None and ctx.dl_1._alive)
-                     or (ctx.cfg.endgame_dl_veto_use_dl2 and ctx.dl_2 is not None and ctx.dl_2._alive))):
-            _pv_intercept = True
+        if eff_s is not None and eff_s >= ctx.cfg.endgame_dl_veto_min_eff_s:
+            _veto_data_avail = ctx.game_progress.dl_3_rescue_policy is not None
+            if (not _veto_data_avail
+                    and eff_s >= ctx.cfg.endgame_dl_veto_dl1_min_eff_s
+                    and ctx.prefetch
+                    and ctx.prefetch.peek_dl_1(ctx.current_position) is not None):
+                _veto_data_avail = True
+            if _veto_data_avail:
+                _pv_intercept = True
         if _ACTIVE_BESTMOVE_SINK is not None:
             _pv_intercept = True
         _eg_live_cb = _make_live_think_cb(ctx, "endgame", ctx.current_position, mode="endgame",
                                           game_phase=_game_phase_value,
-                                          game_phase_delta=_calc_game_phase_delta(_game_phase_value, ctx.gps.last_game_phase))
+                                          game_phase_delta=_calc_game_phase_delta(_game_phase_value, ctx.game_progress.last_game_phase))
+        if ctx.game_progress.dl_3_rescue_policy and _LIVE._ready():
+            _LIVE.update_think_pv(policy=ctx.game_progress.dl_3_rescue_policy, pos=ctx.current_position)
         ponder_move, nnue_info = relay_until_bestmove(
             eng, intercept_bestmove=_pv_intercept,
             full_pv_holder=_nnue_full_pv_holder,
             go_clock=go_clock,
             live_info_cb=_eg_live_cb)
-        _nnue_bestmove_emitted = False
+
 
 
         if use_dedicated and not eng._alive:
@@ -17090,9 +17484,9 @@ def _run_endgame_search(ctx, line, move_count, is_infinite,
                 _mate_join_budget_s = _move_budget_left_s(eff_s, _t_go_start)
                 _mate_join_to_s = ctx.cfg.mate_solver_join_timeout_s
                 if eff_s > 0.0:
-                    _mate_join_to_s = max(0.0, min(
-                        _mate_join_to_s,
-                        max(_mate_join_budget_s, _MATE_JOIN_GRACE_S)))
+                    _mate_join_to_s = _clamp(
+                        max(_mate_join_budget_s, _MATE_JOIN_GRACE_S),
+                        0.0, _mate_join_to_s)
                 _mate_thread.join(timeout=_mate_join_to_s)
                 _mate_join_elapsed = time.perf_counter() - _t_mate_join
                 _mate_thread_alive = _mate_thread.is_alive()
@@ -17127,7 +17521,7 @@ def _run_endgame_search(ctx, line, move_count, is_infinite,
                       "— using ctx.nnue_2 bestmove (no stop sent)")
             else:
                 _mate_solver_result = "timeout"
-                if not ctx._zyfamate and ctx.mate_solver is not None and ctx.mate_solver._alive:
+                if not ctx._zyfamate and _eng_alive(ctx.mate_solver):
                     ctx.mate_solver.send("stop")
                 _dlog("ctx.mate_solver timed out — using ctx.nnue_2 bestmove "
                       "(stop sent; next move will drain stale output)")
@@ -17219,8 +17613,11 @@ def _run_endgame_search(ctx, line, move_count, is_infinite,
                 _eg_arb_vote = None
                 _eg_arb_meta = None
                 if not _move_overridden:
+                    _eg_veto_policy, _eg_veto_src = _select_veto_model(
+                        ctx, eff_s, ctx.current_position)
                     _veto_move, _veto_meta = _endgame_dl_veto_check(
-                        ctx, _final_bestmove, nnue_info.get("score_cp"), eff_s)
+                        ctx, _final_bestmove, nnue_info.get("score_cp"), eff_s,
+                        dl_policy=_eg_veto_policy, dl_src=_eg_veto_src)
                     if _veto_move:
                         _eg_arb_final = _veto_move
                         if ctx.cfg.arb_enable:
@@ -17239,6 +17636,7 @@ def _run_endgame_search(ctx, line, move_count, is_infinite,
                                         go_clock.remaining_ms
                                         if go_clock is not None else None),
                                     move_overhead_ms=_move_overhead_ms,
+                                    live_info_cb=_eg_live_cb,
                                 )
                                 if _eg_arb_vote is not None:
                                     _eg_arb_final = _eg_arb_vote
@@ -17302,7 +17700,7 @@ def _run_endgame_search(ctx, line, move_count, is_infinite,
                         and not is_infinite
                         and not _move_overridden
                         and _final_bestmove not in ("resign", "win", "", None)
-                        and not getattr(ctx.gps, "_rep_council_done", False)):
+                        and not getattr(ctx.game_progress, "_rep_council_done", False)):
                     _rep_repeats = 0
                     try:
                         _cb_rep = _get_tracking_board(ctx)
@@ -17312,12 +17710,12 @@ def _run_endgame_search(ctx, line, move_count, is_infinite,
                         _flog(f"[ignored] REP-COUNCIL board check: {_srce}")
                         _rep_repeats = 0
                     _dl_alive_for_council = (
-                        (ctx.dl_1 is not None and ctx.dl_1._alive)
-                        or (ctx.dl_2 is not None and ctx.dl_2._alive)
+                        _eng_alive(ctx.dl_1)
+                        or _eng_alive(ctx.dl_2)
                     )
                     if (_rep_repeats >= _rep_council_min
                             and _dl_alive_for_council):
-                        ctx.gps._rep_council_done = True
+                        ctx.game_progress._rep_council_done = True
                         _flog(
                             f"[{_rep_council_tag}-REP-COUNCIL] best move {_final_bestmove} "
                             f"would repeat position x{_rep_repeats} "
@@ -17330,15 +17728,15 @@ def _run_endgame_search(ctx, line, move_count, is_infinite,
                             _flog(f"[{_rep_council_tag}-REP-COUNCIL] _deactivate_endgame "
                                   f"failed (continuing to council anyway): {_exe}")
                         _dl_to = (go_clock.dl_timeout_s if go_clock is not None
-                                  else _tdg.dl_time_fallback_ms / 1000.0)
+                                  else _time_dyn.dl_time_fallback_ms / 1000.0)
                         _run_council_search(ctx, line, move_count, _dl_to,
                                             True, go_clock=go_clock)
                         return
                 try:
-                    _cb = _get_tracking_board(ctx)
-                    if (_cb is not None and _final_bestmove
+                    _board = _get_tracking_board(ctx)
+                    if (_board is not None and _final_bestmove
                             and _final_bestmove not in ("resign", "win")
-                            and _cb.is_perpetual_check_move(_final_bestmove)):
+                            and _board.is_perpetual_check_move(_final_bestmove)):
                         _flog(f"[OUTE-SENNICHITE-DIAG] orchestrator board flags "
                               f"{_final_bestmove} as perpetual-check repetition; "
                               f"trusting child engine and emitting as-is "
@@ -17348,8 +17746,7 @@ def _run_endgame_search(ctx, line, move_count, is_infinite,
                 if _move_overridden and not _dl_veto_applied:
                     ponder_move = None
                 if nnue_info is not None:
-                    _eg_ta = (_tdg.time_aggression_rescue_dyn / _time_aggression_base
-                              if _time_aggression_base > 1e-6 else None)
+                    _eg_ta = (_ta_rescue_ratio())
                     _apply_csm_and_regime(
                         ctx, nnue_info, _final_bestmove,
                         nnue_top=_final_bestmove,
@@ -17359,14 +17756,13 @@ def _run_endgame_search(ctx, line, move_count, is_infinite,
                         label="ENDGAME")
                 _safe_bestmove(_final_bestmove, ponder_move, label="endgame",
                                nnue_info=nnue_info)
-                _nnue_bestmove_emitted = True
                 _bm_out = f"bestmove {_final_bestmove}" + (f" ponder {ponder_move}" if ponder_move else "")
                 _flog(f"[v4.31] nnue-only bestmove emitted: {_bm_out!r} "
                       f"(overridden={_move_overridden})")
                 try:
                     _msc = nnue_info.get("score_cp", 0) or 0
                     _mpv = (_nnue_full_pv_holder[0] or "").split() if _nnue_full_pv_holder else []
-                    if (_msc >= 30000 and _mpv and _mpv[0] == _final_bestmove
+                    if (_msc >= _MATE_CP and _mpv and _mpv[0] == _final_bestmove
                             and len(_mpv) >= 2):
                         _store_mate_pv(ctx, ctx.current_position, _mpv)
                 except Exception as _smp_e:
@@ -17379,7 +17775,6 @@ def _run_endgame_search(ctx, line, move_count, is_infinite,
                     _flog(f"[ignored] emergency move: {_ee}")
                 if _emerg:
                     _safe_bestmove(_emerg)
-                    _nnue_bestmove_emitted = True
                     _flog(f"[EMERGENCY] emitted {_emerg!r} from surviving engine "
                           f"(resign avoided)")
                 else:
@@ -17391,16 +17786,14 @@ def _run_endgame_search(ctx, line, move_count, is_infinite,
                         _flog(f"[ignored] wait-revive: {_we}")
                     if _waited:
                         _safe_bestmove(_waited)
-                        _nnue_bestmove_emitted = True
                         _flog(f"[WAIT-REVIVE] emitted {_waited!r} after reviving nnue "
                               "(resign avoided)")
                     else:
                         _safe_bestmove("resign")
-                        _nnue_bestmove_emitted = True
                         _flog("[v4.31] nnue-only: empty bestmove, no surviving engine, "
                               "and nnue revive failed — emitted resign")
 
-        if nnue_info["score_cp"] >= 30000:
+        if nnue_info["score_cp"] >= _MATE_CP:
             _dlog("Mate confirmed in nnue PV during nnue-only mode")
             if (_mate_solver_result == "nomate"
                     and not _pv_mate_override_applied
@@ -17415,16 +17808,16 @@ def _run_endgame_search(ctx, line, move_count, is_infinite,
                 and not is_infinite):
             _t_rescue_start = time.perf_counter()
             _rescue_eff_s = eff_s
-            _rescue_score = nnue_info.get("score_cp", 30000)
+            _rescue_score = nnue_info.get("score_cp", _MATE_CP)
             _rescue_elapsed = time.perf_counter() - _t_rescue_start
-            if (_rescue_eff_s >= _tdg.dl_3_rescue_eff_s_min
+            if (_rescue_eff_s >= _time_dyn.dl_3_rescue_eff_s_min
                     and _rescue_score <= ctx.cfg.dl_3_rescue_cp_threshold):
                 _deactivate_endgame(ctx)
                 _dlog("[MODE] endgame_mode=False (DL_3 rescue reversal)")
                 _flog(
                     f"[DL_3] rescue: ctx.endgame_mode cleared "
                     f"(score_cp={_rescue_score} threshold={ctx.cfg.dl_3_rescue_cp_threshold} "
-                    f"eff_s={_rescue_eff_s:.1f} min={_tdg.dl_3_rescue_eff_s_min} "
+                    f"eff_s={_rescue_eff_s:.1f} min={_time_dyn.dl_3_rescue_eff_s_min} "
                 f"eval_time={_rescue_elapsed:.3f}s)"
                 )
             else:
@@ -17454,7 +17847,6 @@ def _run_endgame_search(ctx, line, move_count, is_infinite,
             "dl_stability_spread": None,
             "dl_top_depth":     None,
             "dl_pv_overlap":    None,
-            "dl_sanity_withdrawn": False,
             "dl_1_nnue_agree_pre_council": None,
             "dl_2_invoked":      False,
             "dl_2_fetch_ms":     0,
@@ -17510,7 +17902,7 @@ def _run_endgame_search(ctx, line, move_count, is_infinite,
             **_gp_record_fields(_game_phase_value,
                                 (_game_phase_WHAND, _game_phase_P, _game_phase_INV,
                                  _game_phase_KING, _game_phase_EXPOSURE, _game_phase_PLY),
-                                ctx.gps.last_game_phase),
+                                ctx.game_progress.last_game_phase),
             "source":           None,
             "nnue_pv": (_nnue_full_pv_holder[0] if _nnue_full_pv_holder[0] else None),
             "dl_display_policy": None,
@@ -17520,6 +17912,7 @@ def _run_endgame_search(ctx, line, move_count, is_infinite,
             "regime_conviction": nnue_info.get("regime_conviction") if nnue_info else None,
             "regime_label": nnue_info.get("regime_label") if nnue_info else None,
             "regime_collapse": nnue_info.get("regime_collapse") if nnue_info else None,
+            "regime_force_crisis": nnue_info.get("regime_force_crisis") if nnue_info else None,
         })
         if _LIVE._ready():
             _eg_ck = ({"remaining_ms": go_clock.remaining_ms, "floor_ms": go_clock.floor_ms,
@@ -17529,32 +17922,32 @@ def _run_endgame_search(ctx, line, move_count, is_infinite,
             _LIVE.set_think(_eg_rec, ctx.current_position, None, _eg_pv, _eg_ck,
                             mode="endgame")
         _append_move_record(ctx, _eg_rec)
-        ctx.gps.last_game_phase = _game_phase_value
-        ctx.gps.last_nnue_score_cp = nnue_info.get("score_cp", 0) or 0
-        ctx.gps.last_nnue_mate_ply = nnue_info.get("mate_ply")
+        ctx.game_progress.last_game_phase = _game_phase_value
+        ctx.game_progress.last_nnue_score_cp = nnue_info.get("score_cp", 0) or 0
+        ctx.game_progress.last_nnue_mate_ply = nnue_info.get("mate_ply")
 
-        ctx.gps.last_child_agreement = 1.0
+        ctx.game_progress.last_child_agreement = 1.0
         _eg_nnue_cp = nnue_info.get("score_cp", 0) or 0
-        ctx.gps.last_council_scores = (
-            None, max(-3000, min(3000, int(_eg_nnue_cp))))
-        ctx.gps.council_agree_streak = 0
-        ctx.gps.opponent_id_last_sample = None
-        ctx.gps.ponder_arb_pred = _ponder_arb_predict_core(
+        ctx.game_progress.last_council_scores = (
+            None, _clamp(int(_eg_nnue_cp), -_SCORE_CLAMP_CP, _SCORE_CLAMP_CP))
+        ctx.game_progress.council_agree_streak = 0
+        ctx.game_progress.opponent_id_last_sample = None
+        ctx.game_progress.ponder_arb_pred = _ponder_arb_predict_core(
             _nnue_full_pv_holder[0], _final_bestmove, ponder_move)
-        ctx.gps.ponder_arb_pred_dl = None
+        ctx.game_progress.ponder_arb_pred_dl = None
 
 
 def _dl_3_try_lazy_warmup_once(ctx, reason="unknown", eff_s=None):
-    if ctx.gps.dl_3_lazy_warmup_done:
+    if ctx.game_progress.dl_3_lazy_warmup_done:
         return
     if not ctx.endgame_mode:
         return
-    if ctx.dl_3 is None or not ctx.dl_3._alive:
+    if not _eng_alive(ctx.dl_3):
         _flog(f"ctx.dl_3 lazy warmup skipped: ctx.dl_3 unavailable (reason={reason})")
         return
-    ctx.gps.dl_3_lazy_warmup_done = True
+    ctx.game_progress.dl_3_lazy_warmup_done = True
     if eff_s is not None and eff_s > 0:
-        _warmup_timeout = max(2.0, min(5.0, eff_s * 0.5))
+        _warmup_timeout = _clamp(eff_s * 0.5, 2.0, 5.0)
     else:
         _warmup_timeout = 5.0
     _t0 = time.perf_counter()
@@ -17580,9 +17973,10 @@ def _dl_3_try_lazy_warmup_once(ctx, reason="unknown", eff_s=None):
         _flog(f"ctx.dl_3 lazy warmup error (non-fatal): {e}")
 
 def _shutdown(ctx, reason="unknown"):
-    if _shutdown_done[0]:
-        return
-    _shutdown_done[0] = True
+    with _shutdown_lock:
+        if _shutdown_done[0]:
+            return
+        _shutdown_done[0] = True
     _LIVE._stop_clock()
     _flog(f"_shutdown called: reason={reason}")
     try:
@@ -17595,7 +17989,7 @@ def _shutdown(ctx, reason="unknown"):
                   "本番較正を汚染しない)")
             raise _DlponderSaveSkip()
         _g = _dlponder_gain_core(_DLPONDER_STATE["nps_ema"], _DLPONDER_STATE["opponent_s_ema"],
-                            int(_params.get("POLICY_NODES", 2000)))
+                            int(_params["POLICY_NODES"]))
         _flog(f"[DLP] state saved: nps_ema="
               f"{_DLPONDER_STATE['nps_ema'] and round(_DLPONDER_STATE['nps_ema'])} "
               f"opponent_s_ema={_DLPONDER_STATE['opponent_s_ema'] and round(_DLPONDER_STATE['opponent_s_ema'], 1)} "
@@ -17612,9 +18006,10 @@ def _shutdown(ctx, reason="unknown"):
         _flog(f"[ignored] _shutdown: {_ie!r}")
     try:
         if ctx.game_log:
-            ctx.game_meta["ponder_arb_dispatched"] = ctx.gps.ponder_arb_dispatched
-            ctx.game_meta["ponder_arb_hits"] = ctx.gps.ponder_arb_hits
+            ctx.game_meta["ponder_arb_dispatched"] = ctx.game_progress.ponder_arb_dispatched
+            ctx.game_meta["ponder_arb_hits"] = ctx.game_progress.ponder_arb_hits
             ctx.game_meta["dlp_mode"] = str(_DLPONDER_STATE.get("mode", "unknown"))
+            ctx.game_meta["dlp_diff"] = _dlp_game_diff()
             _write_game_stats(ctx.game_log, ctx.game_meta, cfg=ctx.cfg)
             _suppressed = (bool(os.environ.get("PYFAMATE_DLP_CAL"))
                            or not ctx.cfg.log_stats)
@@ -17629,7 +18024,7 @@ def _shutdown(ctx, reason="unknown"):
         ctx.prefetch.cancel()
     except Exception as _fe:
         _flog(f"[ignored] {__file__}:7143: {_fe}")
-    if ctx.dl_3 is not None and ctx.dl_3._alive:
+    if _eng_alive(ctx.dl_3):
         try:
             ctx.dl_3.flush_until_ready(timeout=5.0)
         except Exception as _fe:
@@ -17702,8 +18097,8 @@ def _handle_usi(ctx, line):
     print(f"option name POLICY_NODES type spin default {_params['POLICY_NODES']} min 100 max 10000", flush=True)
     _ram_total_mb, _ = _sys_ram_info()
     if _ram_total_mb:
-        _usihash_default = max(256, min(32768, _ram_total_mb // 4))
-        _usihash_min     = max(64,  min(_usihash_default, _ram_total_mb // 64))
+        _usihash_default = _clamp(_ram_total_mb // 4, 256, 32768)
+        _usihash_min     = _clamp(_ram_total_mb // 64, 64, _usihash_default)
     else:
         _usihash_default = 2048
         _usihash_min     = 1024
@@ -17745,7 +18140,7 @@ def _forward_draw_ply_to_children(ctx) -> None:
     _sent = []
     for _nm in ("nnue_1", "nnue_2", "dl_1", "dl_2", "dl_3"):
         _eng = getattr(ctx, _nm, None)
-        if _eng is not None and getattr(_eng, "_alive", False):
+        if _eng_alive(_eng):
             try:
                 _eng.setoption("MaxMovesToDraw", child_val)
                 _sent.append(_nm)
@@ -17760,7 +18155,7 @@ def _forward_draw_ply_to_children(ctx) -> None:
 def _broadcast_setoption(engines, key, value):
     cmd = f"setoption name {key} value {value}"
     for eng in engines:
-        if eng is not None and getattr(eng, '_alive', False):
+        if _eng_alive(eng):
             try:
                 eng.send(cmd)
             except (KeyboardInterrupt, SystemExit, MemoryError):
@@ -17770,10 +18165,8 @@ def _broadcast_setoption(engines, key, value):
                       f"{key}={value} failed: {_bse!r}")
 
 def _handle_setoption(ctx, line):
-    global _move_overhead_ms, _move_overhead_s
     global _draw_ply, _tournament_mode, _opponent_style
     global _opponent_id_nnue_names, _opponent_id_dl_names, _opponent_id_hybrid_names
-    global _rem_moves_expected_game_ply, _dl_min_remaining_moves, _fischer_horizon_moves
     m = _RE_SETOPTION.match(line)
     if m:
         key, val = m.group(1), m.group(2)
@@ -17826,14 +18219,6 @@ def _handle_setoption(ctx, line):
             if not ponder_enabled:
                 _broadcast_setoption(_ponder_targets, "Stochastic_Ponder", "false")
             _flog(f"USI_Ponder set to {ponder_enabled_str} (forwarded to child engines, dl_ponder_enable={_dl_ponder_enable})")
-        elif key in ("EarlyPonder", "Early_Ponder"):
-            if _nnue_1_opts.get("USI_Ponder", "true") == "false":
-                _flog(f"EarlyPonder setoption ignored (USI_Ponder=false overrides)")
-            elif val.strip().lower() == "false":
-                _flog(f"EarlyPonder=false setoption ignored (forced true while USI_Ponder=true)")
-            else:
-                _early_ponder = True
-                _flog(f"_early_ponder gate set True (internal alias; not a YaneuraOu option)")
         elif key in ("MaxMovesToDraw", "Draw_Ply"):
             try:
                 _draw_ply = max(0, int(val))
@@ -17864,7 +18249,7 @@ def _handle_setoption(ctx, line):
         elif key in _SETOPTION_INT_SPIN:
             _soi_lo, _soi_hi, _soi_gname = _SETOPTION_INT_SPIN[key]
             try:
-                _soi_val = max(_soi_lo, min(_soi_hi, int(val)))
+                _soi_val = _clamp(int(val), _soi_lo, _soi_hi)
                 globals()[_soi_gname] = _soi_val
                 if _soi_gname == "_move_overhead_ms":
                     globals()["_move_overhead_s"] = max(0.05, _soi_val / 1000.0)
@@ -17887,8 +18272,23 @@ def _handle_setoption(ctx, line):
                   f"(Book は config.txt 専用・GUI 非公開)")
 
 
+def _warmup_engine(eng, label: str, timeout: float = 30) -> None:
+    if not _eng_alive(eng):
+        return
+    eng.send("position startpos")
+    eng.send("go nodes 1")
+    if eng.wait_for("bestmove", timeout=timeout):
+        _flog(f"{label} warmup: complete")
+    else:
+        _flog(f"{label} warmup: timeout (non-fatal)")
+        try:
+            eng.send("stop")
+            eng.flush_until_ready(timeout=5.0)
+        except Exception:
+            pass
+
 def _handle_isready(ctx, line):
-    if getattr(ctx, "dl_1", None) is not None and ctx.dl_1._alive:
+    if _eng_alive(getattr(ctx, "dl_1", None)):
         _flog("isready: engines already initialized — skipping re-init, "
               "replying readyok only")
         if not _suppress_info_print:
@@ -17904,17 +18304,12 @@ def _handle_isready(ctx, line):
         f"endgame exists={os.path.exists(nnue_2_PATH)}  "
         f"separate={_endgame_separate}  path={nnue_2_PATH}"
     )
-    _flog(
-        f"Endgame DL veto: enable=True "
-        f"use_DL1={ctx.cfg.endgame_dl_veto_use_dl1} "
-        f"use_DL2={ctx.cfg.endgame_dl_veto_use_dl2} "
-        f"(実効=enable ∧ いずれかの use_DLx ∧ 該当 DL が alive)"
-    )
+    _flog(f"Endgame DL veto: DL_3 ponder cache (eff_s < {ctx.cfg.endgame_dl_veto_dl1_min_eff_s:.1f}) / DL_1 peek (eff_s >= {ctx.cfg.endgame_dl_veto_dl1_min_eff_s:.1f})")
     _dl1_model_rel = _dl_1_opts.get("DNN_Model1", "eval/model.onnx")
     _dl2_model_rel = _dl_2_opts.get("DNN_Model1", "eval/model.onnx")
     _dl1_mb = _model_size_mb(DL_1_PATH, _dl1_model_rel)
     _dl2_mb = _model_size_mb(DL_2_PATH, _dl2_model_rel) if ctx.cfg.dl_2_enable else None
-    ctx.gps.dl2_mb_ref = _dl2_mb
+    ctx.game_progress.dl2_mb_ref = _dl2_mb
     global _dl1_mb_for_stab
     _dl1_mb_for_stab = _dl1_mb if _dl1_mb else 115.0
     _dl3_model_rel = _dl_3_opts.get("DNN_Model1", "eval/model.onnx") if ctx.dl_3 else None
@@ -18061,14 +18456,14 @@ def _handle_isready(ctx, line):
             log("WARNING: ctx.dl_1 readyok timeout")
             _flog("WARNING: ctx.dl_1 readyok timeout")
         else:
-            _flog(f"ctx.dl_1  readyok OK")
+            _flog("ctx.dl_1  readyok OK")
         if results.get("y") is None:
             log("WARNING: ctx.nnue_1 readyok timeout")
             _flog("WARNING: ctx.nnue_1 readyok timeout")
             if not ctx.cfg.log_engine_stderr:
                 _flog("HINT: set Log_Engine_Stderr=true in config.txt to capture ctx.nnue_1 crash stderr")
         else:
-            _flog(f"ctx.nnue_1 readyok OK")
+            _flog("ctx.nnue_1 readyok OK")
         if ctx.cfg.dl_2_enable:
             if not _dl_2_init_ok:
                 _flog("DL_2 disabled this session (initialize failed) — "
@@ -18082,7 +18477,7 @@ def _handle_isready(ctx, line):
                 except Exception as _fe:
                     _flog(f"[ignored] DL_2 quit after readyok timeout: {_fe}")
             else:
-                _flog(f"DL_2 readyok OK")
+                _flog("DL_2 readyok OK")
 
         if ctx.mate_solver is not None:
             _flog(
@@ -18109,8 +18504,8 @@ def _handle_isready(ctx, line):
                     _flog(
                         f"ctx.dl_3 started: path={_dl_3_path}  "
                         f"rescue_cp_threshold={ctx.cfg.dl_3_rescue_cp_threshold}  "
-                        f"rescue_eff_s_min={_tdg.dl_3_rescue_eff_s_min:.2f}s  "
-                        f"empty_eff_s_min={_tdg.dl_3_empty_eff_s_min:.2f}s  "
+                        f"rescue_eff_s_min={_time_dyn.dl_3_rescue_eff_s_min:.2f}s  "
+                        f"empty_eff_s_min={_time_dyn.dl_3_empty_eff_s_min:.2f}s  "
                         f"model={_dl3_mb}MB  nodes={_dl_3_effective_nodes}  "
                         f"opts={_dl_3_opts}"
                     )
@@ -18120,33 +18515,9 @@ def _handle_isready(ctx, line):
                                  ctx.dl_3, _dl_3_opts, 45, post_warmup=True)
                 ctx.dl_3 = None
 
-        if ctx.dl_1._alive:
-            ctx.dl_1.send("position startpos")
-            ctx.dl_1.send("go nodes 1")
-            _wu_done = ctx.dl_1.wait_for("bestmove", timeout=30)
-            if _wu_done:
-                _flog("ctx.dl_1 warmup: complete")
-            else:
-                _flog("ctx.dl_1 warmup: timeout (non-fatal)")
-                try:
-                    ctx.dl_1.send("stop")
-                    ctx.dl_1.flush_until_ready(timeout=5.0)
-                except Exception:
-                    pass
-
-        if ctx.cfg.dl_2_enable and ctx.dl_2._alive:
-            ctx.dl_2.send("position startpos")
-            ctx.dl_2.send("go nodes 1")
-            _wu_done_p = ctx.dl_2.wait_for("bestmove", timeout=60)
-            if _wu_done_p:
-                _flog("DL_2 warmup: complete")
-            else:
-                _flog("DL_2 warmup: timeout (non-fatal)")
-                try:
-                    ctx.dl_2.send("stop")
-                    ctx.dl_2.flush_until_ready(timeout=5.0)
-                except Exception:
-                    pass
+        _warmup_engine(ctx.dl_1, "DL_1", timeout=30)
+        if ctx.cfg.dl_2_enable:
+            _warmup_engine(ctx.dl_2, "DL_2", timeout=60)
 
 
         _n_engines = (2 + (1 if ctx.cfg.dl_2_enable else 0)
@@ -18166,7 +18537,7 @@ def _handle_isready(ctx, line):
     _flog("readyok sent")
 
 
-def _harvest_mp_alt_on_go(ctx):
+def _harvest_mp_alt_on_go(ctx, eff_s=None):
     if not _multi_ponder_enable:
         return False
     _alt_pos = ctx.ps.dl2_ponder_pos
@@ -18176,14 +18547,15 @@ def _harvest_mp_alt_on_go(ctx):
     ctx.ps.dl2_ponder_sent = False
     ctx.ps.dl2_ponder_pos = None
     _DLPONDER_STATE["mp_alt_hits"] = int(_DLPONDER_STATE.get("mp_alt_hits", 0)) + 1
-    if ctx.dl_2 is None or not ctx.dl_2._alive:
+    if not _eng_alive(ctx.dl_2):
         return False
     try:
         ctx.dl_2.send("stop")
     except Exception as _fe:
         _flog(f"[ignored] mp-alt stop: {_fe}")
         return False
-    _r2 = _harvest_one_dl_ponder(ctx.dl_2, 1, 0.8, "DL_2-MPALT", cfg=ctx.cfg)
+    _h_budget = _clamp(eff_s * 0.25, 0.15, 0.8) if eff_s and eff_s > 0 else 0.8
+    _r2 = _harvest_one_dl_ponder(ctx.dl_2, 1, _h_budget, "DL_2-MPALT", cfg=ctx.cfg)
     if _r2 is None:
         _dlog("[SMP] alt 命中したが bestmove 未着 — 破棄 (fetch 側 flush に委譲)")
         return False
@@ -18193,40 +18565,71 @@ def _harvest_mp_alt_on_go(ctx):
     return True
 
 
-def _stop_dl_ponders(ctx, reason=""):
+def _parallel_stop_drain(engines, timeout_each, join_timeout, label, mode="flush"):
+    if not engines:
+        return set()
+    _done = {}
+    def _do_drain(e):
+        try:
+            if mode == "flush":
+                _done[e.name] = bool(e.flush_with_stop(timeout=timeout_each))
+            else:
+                e.send("stop")
+                _got_bm = False
+                try:
+                    for _l in e.read_until("bestmove", timeout=timeout_each):
+                        if "bestmove" in _l:
+                            _got_bm = True
+                            break
+                except Exception:
+                    pass
+                _done[e.name] = _got_bm
+        except Exception as _fe:
+            _flog(f"[ignored] {label} drain {e.name}: {_fe}")
+            _done[e.name] = False
+    _ths = [(threading.Thread(target=_do_drain, args=(e,), daemon=True,
+                              name=f"dlpd_{e.name}"), e) for e in engines]
+    for _t, _ in _ths:
+        _t.start()
+    _incomplete = set()
+    for _t, _e in _ths:
+        _t.join(timeout=join_timeout)
+        if _t.is_alive() or not _done.get(_e.name, False):
+            _incomplete.add(_e.name)
+    return _incomplete
+
+
+def _stop_dl_ponders(ctx, reason="", eff_s=None):
     ctx.ps.dl_ponder_pos = None
     ctx.ps.dl2_ponder_pos = None
     _drain_s = 0.5
-    _eff_for_drain = getattr(ctx.ps, "last_eff_s", None)
+    _eff_for_drain = eff_s if (eff_s is not None and eff_s > 0) else getattr(ctx.ps, "last_eff_s", None)
     if isinstance(_eff_for_drain, (int, float)) and _eff_for_drain > 0:
-        _drain_s = min(0.5, max(0.1, _eff_for_drain * 0.2))
+        _drain_s = _clamp(_eff_for_drain * 0.2, 0.1, 0.5)
+    _to_drain = []
     for _flag_name, _eng in (("dl1_ponder_sent", ctx.dl_1),
                              ("dl2_ponder_sent", ctx.dl_2),
                              ("dl3_ponder_sent", ctx.dl_3)):
         if getattr(ctx.ps, _flag_name, False):
             setattr(ctx.ps, _flag_name, False)
-            if _eng is not None and _eng._alive:
-                try:
-                    _eng.send("stop")
-                    _drained = False
-                    try:
-                        for _l in _eng.read_until("bestmove", timeout=_drain_s):
-                            if "bestmove" in _l:
-                                _drained = True
-                                break
-                    except Exception:
-                        pass
-                    _dlog(f"[DL-Ponder] {_eng.name} go ponder stopped+drained "
-                          f"({reason}; bestmove={'消費' if _drained else '未着'} "
-                          f"budget={_drain_s:.2f}s)")
-                except Exception as _fe:
-                    _flog(f"[ignored] _stop_dl_ponders {_flag_name}: {_fe}")
+            if _eng_alive(_eng):
+                _to_drain.append(_eng)
+    _incomplete = _parallel_stop_drain(
+        _to_drain, _drain_s, _drain_s + 0.5,
+        f"DL-Ponder-stop/{reason}", mode="bestmove")
+    if _incomplete:
+        _DLPONDER_STATE["dlp_drain_incomplete"] = \
+            int(_DLPONDER_STATE.get("dlp_drain_incomplete", 0)) + len(_incomplete)
+    for _e in _to_drain:
+        _dlog(f"[DL-Ponder] {_e.name} go ponder stopped+drained "
+              f"({reason}; bestmove={'未着' if _e.name in _incomplete else '消費'} "
+              f"budget={_drain_s:.2f}s)")
 
 
 def _stop_nnue_ponders(ctx, reason=""):
     if ctx.ps.nnue1_ponder_sent:
         ctx.ps.nnue1_ponder_sent = False
-        if ctx.nnue_1 is not None and ctx.nnue_1._alive:
+        if _eng_alive(ctx.nnue_1):
             try:
                 ctx.nnue_1.send("stop")
                 relay_until_bestmove(ctx.nnue_1, timeout=2.0,
@@ -18245,42 +18648,48 @@ def _dl_ponder_dispatch(ctx, line, pos=None, label="go-ponder", dl2_pos=None):
         dl2_pos = None
     _any_flag = (ctx.ps.dl1_ponder_sent or ctx.ps.dl2_ponder_sent
                  or ctx.ps.dl3_ponder_sent)
-    if _any_flag and ctx.ps.dl_ponder_pos == _dl_pos:
-        _dlog(f"[DL-Ponder/{label}] dedup: 同一局面を ponder 中 — 再送せず継続"
-              + (" (DL_2 alt 線も温存)" if ctx.ps.dl2_ponder_pos else ""))
-        return
+    _continuing = (_any_flag and ctx.ps.dl_ponder_pos == _dl_pos)
 
     _skip = set()
-    if _any_flag:
+    if _continuing:
+        _rejoin_candidates = []
+        for _fl, _eng in (("dl1_ponder_sent", ctx.dl_1),
+                          ("dl2_ponder_sent", ctx.dl_2),
+                          ("dl3_ponder_sent", ctx.dl_3)):
+            if not getattr(ctx.ps, _fl, False) and _eng_alive(_eng):
+                _rejoin_candidates.append(_eng)
+        if not _rejoin_candidates:
+            _dlog(f"[DL-Ponder/{label}] dedup: 同一局面を ponder 中 — 再送せず継続"
+                  + (" (DL_2 alt 線も温存)" if ctx.ps.dl2_ponder_pos else ""))
+            return
+        _skip = _parallel_stop_drain(
+            _rejoin_candidates, 1.5, 2.0,
+            f"DL-Ponder/{label}/rejoin", mode="flush")
+        _n_rejoined = len(_rejoin_candidates) - len(_skip)
+        if _n_rejoined > 0:
+            _DLPONDER_STATE["dlp_rejoin"] =                 int(_DLPONDER_STATE.get("dlp_rejoin", 0)) + _n_rejoined
+        for _dn in _skip:
+            _flog(f"[DL-Ponder/{label}] {_dn} rejoin drain 未完 — "
+                  "復帰送信をスキップ (kill はしない)")
+    elif _any_flag:
         _drain = []
         for _fl, _eng in (("dl1_ponder_sent", ctx.dl_1),
                           ("dl2_ponder_sent", ctx.dl_2),
                           ("dl3_ponder_sent", ctx.dl_3)):
-            if getattr(ctx.ps, _fl) and _eng is not None and _eng._alive:
+            if getattr(ctx.ps, _fl) and _eng_alive(_eng):
                 _drain.append(_eng)
             setattr(ctx.ps, _fl, False)
-        _done = {}
-        def _do_drain(e):
-            try:
-                _done[e.name] = bool(e.flush_with_stop(timeout=1.5))
-            except Exception as _fe:
-                _flog(f"[ignored] dl_ponder drain {e.name}: {_fe}")
-                _done[e.name] = False
-        _ths = [(threading.Thread(target=_do_drain, args=(e,), daemon=True,
-                                  name=f"dlpd_{e.name}"), e) for e in _drain]
-        for _t, _ in _ths:
-            _t.start()
-        for _t, _e in _ths:
-            _t.join(timeout=2.0)
-            if _t.is_alive() or not _done.get(_e.name, False):
-                _skip.add(_e.name)
-                _flog(f"[DL-Ponder/{label}] {_e.name} drain 未完 — "
-                      "今回の go ponder 送信をスキップ (kill はしない)")
+        _skip = _parallel_stop_drain(
+            _drain, 1.5, 2.0, f"DL-Ponder/{label}", mode="flush")
+        for _dn in _skip:
+            _flog(f"[DL-Ponder/{label}] {_dn} drain 未完 — "
+                  "今回の go ponder 送信をスキップ (kill はしない)")
         ctx.ps.dl_ponder_pos = None
         ctx.ps.dl2_ponder_pos = None
 
     if not _dlponder_forward_gate_core(_DLPONDER_STATE.get("opponent_s_ema"),
                                   float(_cfg.get("DLP_Ponder_Min_Opp_S", 1.5))):
+        _DLPONDER_STATE["dlp_gate_skips"] =             int(_DLPONDER_STATE.get("dlp_gate_skips", 0)) + 1
         _flog(f"[DLP-GATE/{label}] DL go ponder skipped this move "
               f"(opponent_s_ema={round(_DLPONDER_STATE['opponent_s_ema'], 1)}s < "
               f"{_cfg.get('DLP_Ponder_Min_Opp_S', 1.5)}s — 木が育つ前に終わる相手番)")
@@ -18296,7 +18705,9 @@ def _dl_ponder_dispatch(ctx, line, pos=None, label="go-ponder", dl2_pos=None):
     _sent_any = False
     _dl2_alt_sent = False
     for _fl, _eng, _gate, _send_pos, _sp_want in _targets:
-        if not _gate or _eng is None or not _eng._alive or _eng.name in _skip:
+        if not _gate or not _eng_alive(_eng) or _eng.name in _skip:
+            continue
+        if _continuing and getattr(ctx.ps, _fl, False):
             continue
         try:
             if (_sp_want is not None
@@ -18322,7 +18733,7 @@ def _dl_ponder_dispatch(ctx, line, pos=None, label="go-ponder", dl2_pos=None):
         _flog(f"[DL-Ponder/{label}] go ponder forwarded "
               f"(dl1={ctx.ps.dl1_ponder_sent} dl2={ctx.ps.dl2_ponder_sent} "
               f"dl3={ctx.ps.dl3_ponder_sent}"
-              + (f" / SMP alt: DL_2 具体線 SP=false" if _dl2_alt_sent else "")
+              + (" / SMP alt: DL_2 具体線 SP=false" if _dl2_alt_sent else "")
               + ")")
 
 
@@ -18341,34 +18752,39 @@ def _teardown_game(ctx, reason):
     ctx.prefetch.cancel()
 
 
+def _locked_usinewgame(lock, eng, label: str) -> None:
+    if not _eng_alive(eng):
+        return
+    if lock.acquire(timeout=5.0):
+        try:
+            eng.send("usinewgame")
+        finally:
+            lock.release()
+        return
+    _flog(f"[usinewgame][LOCK-CAP] {label}_lock acquire timeout (5s) — "
+          "stop 送信で保持者 fetch をアンブロックして再試行")
+    try:
+        eng.send("stop")
+    except Exception as _fe:
+        _flog(f"[ignored] usinewgame LOCK-CAP {label} stop: {_fe}")
+    if lock.acquire(timeout=3.0):
+        try:
+            eng.send("usinewgame")
+        finally:
+            lock.release()
+    else:
+        _flog(f"[usinewgame][LOCK-CAP] {label}_lock still held after stop+3s — "
+              "usinewgame skip (次 go が position を全送するため安全側)")
+
 
 def _handle_usinewgame(ctx, line):
     _diag_reset()
     _teardown_game(ctx, "usinewgame")
-    if ctx.prefetch.dl_1_lock.acquire(timeout=5.0):
-        try:
-            ctx.dl_1.send("usinewgame")
-        finally:
-            ctx.prefetch.dl_1_lock.release()
-    else:
-        _flog("[usinewgame][LOCK-CAP] dl_1_lock acquire timeout (5s) — "
-              "stop 送信で保持者 fetch をアンブロックして再試行")
-        try:
-            ctx.dl_1.send("stop")
-        except Exception as _fe:
-            _flog(f"[ignored] usinewgame LOCK-CAP dl_1 stop: {_fe}")
-        if ctx.prefetch.dl_1_lock.acquire(timeout=3.0):
-            try:
-                ctx.dl_1.send("usinewgame")
-            finally:
-                ctx.prefetch.dl_1_lock.release()
-        else:
-            _flog("[usinewgame][LOCK-CAP] dl_1_lock still held after stop+3s — "
-                  "usinewgame skip (次 go が position を全送するため安全側)")
+    _locked_usinewgame(ctx.prefetch.dl_1_lock, ctx.dl_1, "dl_1")
     _wsl_restore = []
     for _eng_attr_r in ("nnue_1", "nnue_2"):
         _eng_r = getattr(ctx, _eng_attr_r, None)
-        if _eng_r is not None and getattr(_eng_r, "_alive", False):
+        if _eng_alive(_eng_r):
             _orig_h = getattr(_eng_r, "_dyn_hash_original", None)
             if _orig_h is not None and _orig_h > 1:
                 _wsl_restore.append((_eng_attr_r, _eng_r, _orig_h))
@@ -18396,31 +18812,9 @@ def _handle_usinewgame(ctx, line):
             _flog("[STALE-GUARD] usinewgame: nnue_1 が局頭で無応答 "
                   "(前局 WSL orphan による汚染の疑い) — 再起動して健全化")
             _restart_nnue_1(ctx, "usinewgame-stale")
-    if ctx.dl_2_lock.acquire(timeout=5.0):
-        try:
-            if ctx.dl_2._alive:
-                ctx.dl_2.send("usinewgame")
-        finally:
-            ctx.dl_2_lock.release()
-    else:
-        _flog("[usinewgame][LOCK-CAP] dl_2_lock acquire timeout (5s) — "
-              "stop 送信で保持者 fetch をアンブロックして再試行")
-        if ctx.dl_2._alive:
-            try:
-                ctx.dl_2.send("stop")
-            except Exception as _fe:
-                _flog(f"[ignored] usinewgame LOCK-CAP stop: {_fe}")
-        if ctx.dl_2_lock.acquire(timeout=3.0):
-            try:
-                if ctx.dl_2._alive:
-                    ctx.dl_2.send("usinewgame")
-            finally:
-                ctx.dl_2_lock.release()
-        else:
-            _flog("[usinewgame][LOCK-CAP] dl_2_lock still held after stop+3s — "
-                  "usinewgame skip (次 go が position を全送するため安全側)")
-    if ctx.dl_3 is not None and ctx.dl_3._alive:
-        _dl3_need_warmup = not ctx.gps.dl_3_lazy_warmup_done
+    _locked_usinewgame(ctx.dl_2_lock, ctx.dl_2, "dl_2")
+    if _eng_alive(ctx.dl_3):
+        _dl3_need_warmup = not ctx.game_progress.dl_3_lazy_warmup_done
         _dl3_eng = ctx.dl_3
         def _bg_dl3(_eng=_dl3_eng, _ctx=ctx, _warmup=_dl3_need_warmup):
             try:
@@ -18440,7 +18834,7 @@ def _handle_usinewgame(ctx, line):
                                 _eng.flush_until_ready(timeout=2.0)
                             except Exception:
                                 pass
-                        _ctx.gps.dl_3_lazy_warmup_done = True
+                        _ctx.game_progress.dl_3_lazy_warmup_done = True
             except Exception as _e:
                 _flog(f"[DL_3-ASYNC-INIT] error (non-fatal): {_e!r}")
         threading.Thread(target=_bg_dl3, daemon=True,
@@ -18483,11 +18877,13 @@ def _handle_usinewgame(ctx, line):
     global _usi_session_active
     _usi_session_active = True
     ctx.time_aggression.reset_to_static()
-    ctx.game_meta["ponder_arb_dispatched"] = ctx.gps.ponder_arb_dispatched
-    ctx.game_meta["ponder_arb_hits"] = ctx.gps.ponder_arb_hits
+    ctx.game_meta["ponder_arb_dispatched"] = ctx.game_progress.ponder_arb_dispatched
+    ctx.game_meta["ponder_arb_hits"] = ctx.game_progress.ponder_arb_hits
     ctx.game_meta["dlp_mode"] = str(_DLPONDER_STATE.get("mode", "unknown"))
+    ctx.game_meta["dlp_diff"] = _dlp_game_diff()
     if ctx.game_log:
         _write_game_stats(ctx.game_log, ctx.game_meta, cfg=ctx.cfg)
+    _dlp_snapshot_for_diff()
     ctx.reset_game()
 
     _flog("usinewgame: game state reset")
@@ -18497,13 +18893,14 @@ def _handle_usinewgame(ctx, line):
     if getattr(ctx, "book2", None) is not None:
         _book2_kill(ctx, reason="usinewgame — 新局のため第2 Book を一旦終了")
     ctx.book2_state.reset()
+    _assert_sp_consistency(ctx, "usinewgame")
 
 
 def _sync_sp_setoption(ctx, clock, label):
     if ctx.cfg.sp_min_eff_s < 0.0:
         return
     _eff = clock.eff_s if clock is not None else 0.0
-    _val = "true" if _eff >= ctx.cfg.sp_min_eff_s else "false"
+    _val = _bstr(_eff >= ctx.cfg.sp_min_eff_s)
     if _val != _nnue_1_opts.get("Stochastic_Ponder", "true"):
         ctx.nnue_1.send(f"setoption name Stochastic_Ponder value {_val}")
         _nnue_1_opts["Stochastic_Ponder"] = _val
@@ -18530,7 +18927,7 @@ def _wire_ponder_live_cb(ctx):
         if _sc is None:
             _m = _RE_MATE.search(ln)
             if _m:
-                _sc = 30000 if int(_m.group(1)) > 0 else -30000
+                _sc = _mate_sign_score(int(_m.group(1)))
         _pv = None
         if " pv " in ln:
             _p = _RE_PV_FULL.search(ln)
@@ -18545,9 +18942,9 @@ def _wire_ponder_live_cb(ctx):
         _LIVE.update_think_pv(pv=_pv, score_cp=_sc, pos=_pos)
     ctx.nnue_1._live_info_cb = _cb
 
-    if ctx.dl_1 is not None and ctx.dl_1._alive:
+    if _eng_alive(ctx.dl_1):
         ctx.dl_1._live_info_cb = _make_dl1_multipv_cb(ctx, _pos)
-    elif ctx.dl_2 is not None and ctx.dl_2._alive:
+    elif _eng_alive(ctx.dl_2):
         ctx.dl_2._live_info_cb = _make_dl1_multipv_cb(ctx, _pos)
 
 def _handle_go_ponder(ctx, line):
@@ -18568,7 +18965,7 @@ def _handle_go_ponder(ctx, line):
             ctx.ps.nnue1_ponder_sent = False
             ctx.nnue_1.send("stop")
             _ov_eff_s = ctx.ps.ponder_clock.eff_s if ctx.ps.ponder_clock else 5.0
-            _ov_timeout = max(_move_overhead_s, min(_ov_eff_s, _ov_eff_s * 0.5 + _move_overhead_s))
+            _ov_timeout = _clamp(_ov_eff_s * 0.5 + _move_overhead_s, _move_overhead_s, _ov_eff_s)
             relay_until_bestmove(
                 ctx.nnue_1, timeout=_ov_timeout, intercept_bestmove=True,
                 kill_on_empty=False)
@@ -18579,8 +18976,8 @@ def _handle_go_ponder(ctx, line):
         ctx.ps.active      = True
         ctx.ps.mate_skip_pending = False
         move_count = _count_moves(ctx.current_position)
-        _go_ponder_clock, _, _ = _parse_go_clock_base(ctx.ps.ponder_line, move_count)
-        _go_ponder_clock_opp, _, _ = _parse_go_clock_base(ctx.ps.ponder_line, move_count - 1)
+        _go_ponder_clock, _, _ = _parse_go_clock_base(ctx.ps.ponder_line, move_count, cfg=ctx.cfg)
+        _go_ponder_clock_opp, _, _ = _parse_go_clock_base(ctx.ps.ponder_line, move_count - 1, cfg=ctx.cfg)
         ctx.ps.ponder_clock = _go_ponder_clock
         ctx.ps.ponder_clock_opp = _go_ponder_clock_opp
         _cur_game_phase = _calc_game_phase(ctx.current_position, cfg=ctx.cfg)
@@ -18606,7 +19003,7 @@ def _handle_go_ponder(ctx, line):
         _flog("go ponder received while ponder already active — stopping previous ponder first")
         ctx.nnue_1.send("stop")
         _ov_eff_s = ctx.ps.ponder_clock.eff_s if ctx.ps.ponder_clock else 5.0
-        _ov_timeout = max(3.0, min(8.0, _ov_eff_s * 0.5))
+        _ov_timeout = _clamp(_ov_eff_s * 0.5 + _move_overhead_s, _move_overhead_s, _ov_eff_s)
         _ov_pm, _ov_ni = relay_until_bestmove(
             ctx.nnue_1, timeout=_ov_timeout, intercept_bestmove=True,
             kill_on_empty=False,
@@ -18632,8 +19029,8 @@ def _handle_go_ponder(ctx, line):
         f"[DBG-GP] go ponder saved: ply={move_count} "
         f"line={line!r} has_clock={_go_ponder_has_time}"
     )
-    _go_ponder_clock, _, _ = _parse_go_clock_base(ctx.ps.ponder_line, move_count)
-    _go_ponder_clock_opp, _, _ = _parse_go_clock_base(ctx.ps.ponder_line, move_count - 1)
+    _go_ponder_clock, _, _ = _parse_go_clock_base(ctx.ps.ponder_line, move_count, cfg=ctx.cfg)
+    _go_ponder_clock_opp, _, _ = _parse_go_clock_base(ctx.ps.ponder_line, move_count - 1, cfg=ctx.cfg)
     ctx.ps.ponder_clock = _go_ponder_clock
     ctx.ps.ponder_clock_opp = _go_ponder_clock_opp
     _cur_game_phase = _calc_game_phase(ctx.current_position, cfg=ctx.cfg)
@@ -18643,22 +19040,32 @@ def _handle_go_ponder(ctx, line):
     ctx.ps.handover_game_phase = _handover_game_phase
     use_dl     = (not ctx.endgame_mode) and ctx.dl_1._alive and (_cur_game_phase < _handover_game_phase)
 
+    if ctx.ps.nnue1_dirty and ctx.nnue_1._alive:
+        _to = 3.0
+        if ctx.nnue_1.flush_until_ready(timeout=_to, max_stale_lines=100):
+            ctx.ps.nnue1_dirty = False
+            _flog("[SP-DIRTY] nnue_1 resynced before go ponder")
+        else:
+            _flog("[SP-DIRTY] resync failed — restarting nnue_1 before go ponder")
+            _restart_nnue_1(ctx, "sp-dirty-goponder")
+            ctx.ps.nnue1_dirty = False
+
     if not ctx.nnue_1._alive:
         _flog("go ponder: ctx.nnue_1 not alive — skipping ponder")
         _restart_nnue_1(ctx, "go-ponder-revive", async_launch=True)
         ctx.prefetch.cancel()
         ctx.ps.active = False
-    elif ctx.cfg.mate_score_ponder_skip and ctx.gps.last_nnue_score_cp >= 30000:
+    elif ctx.cfg.mate_score_ponder_skip and ctx.game_progress.last_nnue_score_cp >= _MATE_CP:
         _flog(
-            f"go ponder: mate score ({ctx.gps.last_nnue_score_cp}cp >= 30000) "
+            f"go ponder: mate score ({ctx.game_progress.last_nnue_score_cp}cp >= 30000) "
             f"— skipping ctx.nnue_1 ponder to avoid relay timeout on ponderhit "
             f"(stop emergency bestmove armed)"
         )
         ctx.ps.active            = False
         ctx.ps.mate_skip_pending = True
-    elif (not ctx.cfg.mate_score_ponder_skip) and ctx.gps.last_nnue_score_cp >= 30000:
+    elif (not ctx.cfg.mate_score_ponder_skip) and ctx.game_progress.last_nnue_score_cp >= _MATE_CP:
         _flog(
-            f"go ponder: mate score ({ctx.gps.last_nnue_score_cp}cp >= 30000) "
+            f"go ponder: mate score ({ctx.game_progress.last_nnue_score_cp}cp >= 30000) "
             f"— forwarding to nnue_1 (Mate_Score_Ponder_Skip=false)"
         )
         ctx.nnue_1.send(ctx.current_position)
@@ -18692,7 +19099,7 @@ def _handle_go_ponder(ctx, line):
             )
             if _use_dl2_pre:
                 _pre_eff_s = _go_ponder_clock_opp.eff_s if _go_ponder_clock_opp is not None else 0.0
-                _pre_flush_timeout = max(_move_overhead_s, min(_pre_eff_s, _move_overhead_s * 10.0))
+                _pre_flush_timeout = _clamp(_move_overhead_s * 10.0, _move_overhead_s, _pre_eff_s)
 
                 def _dl2_pre_flush(_timeout=_pre_flush_timeout):
                     if not ctx.dl_2_lock.acquire(blocking=False):
@@ -18710,7 +19117,7 @@ def _handle_go_ponder(ctx, line):
                     name="dl2_pre_flush"
                 ).start()
             _prefetch_nodes_eff = ctx.cfg.dl_prefetch_nodes
-            _prefetch_timeout_eff = _tdg.dl_time_fallback_ms / 1000.0
+            _prefetch_timeout_eff = _time_dyn.dl_time_fallback_ms / 1000.0
             if ctx.cfg.gpu_ponder_enable:
                 _go_ponder_eff_for_pf = _go_ponder_clock_opp.eff_s if _go_ponder_clock_opp is not None else 0.0
                 _prefetch_nodes_eff = min(
@@ -18718,7 +19125,7 @@ def _handle_go_ponder(ctx, line):
                     max(ctx.cfg.dl_prefetch_nodes,
                         int(_go_ponder_eff_for_pf * ctx.cfg.gpu_ponder_nodes_per_eff_s)))
                 _prefetch_timeout_eff = max(
-                    _tdg.dl_time_fallback_ms / 1000.0,
+                    _time_dyn.dl_time_fallback_ms / 1000.0,
                     min(_go_ponder_eff_for_pf * 3.0 + 5.0, 120.0))
                 _dlog(lambda: f"[GPU-Ponder] prefetch nodes={_prefetch_nodes_eff} "
                               f"timeout={_prefetch_timeout_eff:.1f}s "
@@ -18730,7 +19137,7 @@ def _handle_go_ponder(ctx, line):
                                timeout=_prefetch_timeout_eff,
                                dl_2=ctx.dl_2 if _use_dl2_pre else None,
                                dl_2_lock=ctx.dl_2_lock if _use_dl2_pre else None)
-            ctx.gps.first_search_done = True
+            ctx.game_progress.first_search_done = True
 
             _dl_ponder_dispatch(ctx, line, label="gui-go-ponder")
         else:
@@ -18784,7 +19191,7 @@ _CHILD_RESTART_LOCKS = {_s: threading.Lock() for _s in _CHILD_RESTART_SLOTS}
 
 def _restart_child_async(ctx, slot, caller):
     eng = getattr(ctx, slot, None)
-    if eng is None or getattr(eng, "_alive", False):
+    if eng is None or _eng_alive(eng):
         return
     _ft = getattr(eng, "_restart_fail_t", None)
     if _ft is not None and time.perf_counter() - _ft < 45.0:
@@ -18820,35 +19227,37 @@ def _restart_child(ctx, slot, caller, readyok_timeout=None):
         _flog(f"{caller}: ctx.{slot} restart already in progress (another thread) "
               "— skipping duplicate")
         return False
-    if getattr(eng, "_alive", False):
-        _clk.release()
-        _flog(f"{caller}: ctx.{slot} already alive (revived concurrently) — skip")
-        return True
-    _flog(f"{caller}: ctx.{slot} not alive — attempting restart "
-          f"(readyok_timeout={_to:.1f}s)")
     try:
-        ok = _engine_lifecycle_restart(eng, opts, caller,
-                                       readyok_timeout=_to,
-                                       post_flush=_s["flush"])
-        if ok:
-            if slot == "dl_3":
-                ctx.gps.dl_3_readyok_streak = 0
-            _flog(f"{caller}: ctx.{slot} restarted OK")
-        else:
-            _flog(f"{caller}: ctx.{slot} restart failed — continuing without")
-            eng._restart_fail_t = time.perf_counter()
+        if _eng_alive(eng):
+            _flog(f"{caller}: ctx.{slot} already alive (revived concurrently) — skip")
+            return True
+        _flog(f"{caller}: ctx.{slot} not alive — attempting restart "
+              f"(readyok_timeout={_to:.1f}s)")
+        try:
+            ok = _engine_lifecycle_restart(eng, opts, caller,
+                                           readyok_timeout=_to,
+                                           post_flush=_s["flush"])
+            if ok:
+                if slot == "dl_3":
+                    ctx.game_progress.dl_3_readyok_streak = 0
+                _flog(f"{caller}: ctx.{slot} restarted OK")
+            else:
+                _flog(f"{caller}: ctx.{slot} restart failed — continuing without")
+                eng._restart_fail_t = time.perf_counter()
+                if slot == "mate_solver":
+                    ctx.mate_solver = None
+            return ok
+        except Exception as e:
+            _flog(f"{caller}: ctx.{slot} restart failed (non-fatal): {e}")
+            try:
+                eng._restart_fail_t = time.perf_counter()
+            except Exception:
+                pass
             if slot == "mate_solver":
                 ctx.mate_solver = None
-        return ok
-    except Exception as e:
-        _flog(f"{caller}: ctx.{slot} restart failed (non-fatal): {e}")
-        try:
-            eng._restart_fail_t = time.perf_counter()
-        except Exception:
-            pass
-        if slot == "mate_solver":
-            ctx.mate_solver = None
-        return False
+            return False
+    finally:
+        _clk.release()
 
 def _compute_go_time_dynamics(
     *,
@@ -18947,11 +19356,9 @@ def _compute_go_time_dynamics(
 
     _falling_dec = falling_fac if falling_fac < 1.0 else 1.0
     _falling_ext = falling_fac if falling_fac > 1.0 else 1.0
-    trivial_applied = False
     _decay = score_fac * stability_reduction * _falling_dec
     if trivial_cap and time_aggression_trivial_cap != 1.0:
         _decay *= time_aggression_trivial_cap
-        trivial_applied = True
     if _decay < time_aggression_decay_floor:
         _decay = time_aggression_decay_floor
     _momentum_ext = 1.0
@@ -18970,10 +19377,8 @@ def _compute_go_time_dynamics(
 
     time_aggression_merged = base * time_norm * game_phase_fac * _falling_ext * _momentum_ext * _sharpness_fac * _cont_ext * _decay
 
-    ponder_applied = False
     if is_ponder and time_aggression_ponder_bonus != 1.0:
         time_aggression_merged *= time_aggression_ponder_bonus
-        ponder_applied = True
 
     if time_aggression_merged < _TA_FAC_FLOOR:
         time_aggression_merged = _TA_FAC_FLOOR
@@ -19018,7 +19423,7 @@ def _compute_go_time_dynamics(
 
 
 def _apply_time_dynamics(ctx, line, move_count, label="go", clock_base=None):
-    _score_cp_cur = ctx.gps.last_nnue_score_cp
+    _score_cp_cur = ctx.game_progress.last_nnue_score_cp
     if clock_base is not None:
         _our_remaining_ms = clock_base.remaining_ms
         _byo_ms = clock_base.byo_ms
@@ -19036,10 +19441,10 @@ def _apply_time_dynamics(ctx, line, move_count, label="go", clock_base=None):
         _guaranteed_ms = 0.0
 
     _game_phase_for_ta = _calc_game_phase(ctx.current_position, cfg=ctx.cfg,
-                                          child_agreement=ctx.gps.last_child_agreement)
+                                          child_agreement=ctx.game_progress.last_child_agreement)
     _game_phase_for_ta_folded = _game_phase_for_phase_council(
         _game_phase_for_ta, ctx.cfg.council_nyugyoku_dl_restore)
-    _time_aggression_prev = _tdg.time_aggression
+    _time_aggression_prev = _time_dyn.time_aggression
     _cfg_go = ctx.cfg
     _td = _compute_go_time_dynamics(
         time_aggression_base                   = _cfg_go.time_aggression_base,
@@ -19058,8 +19463,8 @@ def _apply_time_dynamics(ctx, line, move_count, label="go", clock_base=None):
         time_aggression_dl_resolved            = _resolve_ta("Time_Aggression_DL",     _cfg_go.time_aggression_base),
         time_aggression_nnue_resolved          = _resolve_ta("Time_Aggression_NNUE",   _cfg_go.time_aggression_base),
         time_aggression_rescue_resolved        = _resolve_ta("Time_Aggression_Rescue", _cfg_go.time_aggression_base),
-        lerp_dl_ratio                          = _LERP_DL_RATIO,
-        lerp_dl_max_ms                         = _LERP_DL_MAX_MS,
+        lerp_dl_ratio                          = (ctx.cfg.lerp_dl_ratio_lo, ctx.cfg.lerp_dl_ratio_hi),
+        lerp_dl_max_ms                         = (ctx.cfg.lerp_dl_max_ms_lo, ctx.cfg.lerp_dl_max_ms_hi),
         dl_time_ratio_user_set                 = _cfg_go.dl_time_ratio_user_set,
         dl_time_max_ms_user_set                = _cfg_go.dl_time_max_ms_user_set,
         dl_2_margin_min_user_set               = _cfg_go.dl_2_margin_min_user_set,
@@ -19067,13 +19472,13 @@ def _apply_time_dynamics(ctx, line, move_count, label="go", clock_base=None):
         dl_3_empty_user_set                    = _cfg_go.dl_3_empty_user_set,
         dl_time_fallback_user_set              = _cfg_go.dl_time_fallback_user_set,
         dl_2_time_max_user_set                 = _cfg_go.dl_2_time_max_user_set,
-        prev_score_cp                          = ctx.gps.prev_own_score_cp,
+        prev_score_cp                          = ctx.game_progress.prev_own_score_cp,
         now_prev_score_cp                      = _score_cp_cur,
-        stable_winner_streak                   = ctx.gps.council_agree_streak,
-        trivial_cap                            = (ctx.gps.last_nnue_score_cp is not None
-                                                  and ctx.gps.last_nnue_score_cp >= 30000
-                                                  and ctx.gps.last_nnue_mate_ply is not None
-                                                  and abs(ctx.gps.last_nnue_mate_ply) <= ctx.cfg.trivial_cap_mate_ply_max),
+        stable_winner_streak                   = ctx.game_progress.council_agree_streak,
+        trivial_cap                            = (ctx.game_progress.last_nnue_score_cp is not None
+                                                  and ctx.game_progress.last_nnue_score_cp >= _MATE_CP
+                                                  and ctx.game_progress.last_nnue_mate_ply is not None
+                                                  and abs(ctx.game_progress.last_nnue_mate_ply) <= ctx.cfg.trivial_cap_mate_ply_max),
         time_aggression_fall_gain              = ctx.cfg.time_aggression_fall_gain,
         time_aggression_fall_floor             = ctx.cfg.time_aggression_fall_floor,
         time_aggression_fall_ceil              = ctx.cfg.time_aggression_fall_ceil,
@@ -19082,50 +19487,50 @@ def _apply_time_dynamics(ctx, line, move_count, label="go", clock_base=None):
         time_aggression_ponder_bonus           = ctx.cfg.time_aggression_ponder_bonus,
         time_aggression_trivial_cap            = ctx.cfg.time_aggression_trivial_cap,
         time_aggression_decay_floor            = ctx.cfg.time_aggression_decay_floor,
-        last_momentum                          = ctx.gps.last_momentum,
-        last_sharpness                         = ctx.gps.last_sharpness,
+        last_momentum                          = ctx.game_progress.last_momentum,
+        last_sharpness                         = ctx.game_progress.last_sharpness,
         time_aggression_momentum_ext_gain      = ctx.cfg.time_aggression_momentum_ext_gain,
         time_aggression_momentum_acc_gain      = ctx.cfg.time_aggression_momentum_acc_gain,
         time_aggression_sharpness_base         = ctx.cfg.time_aggression_sharpness_base,
         time_aggression_sharpness_range        = ctx.cfg.time_aggression_sharpness_range,
-        last_dl_cont_changed                   = ctx.gps.last_dl_cont_changed,
+        last_dl_cont_changed                   = ctx.game_progress.last_dl_cont_changed,
         time_aggression_dl_cont_change_ext     = ctx.cfg.time_aggression_dl_cont_change_ext,
     )
-    ctx.gps.prev_own_score_cp = _score_cp_cur
+    ctx.game_progress.prev_own_score_cp = _score_cp_cur
 
-    _tdg.time_aggression = _td.time_aggression
-    _tdg.time_aggression_dl_dyn = _td.time_aggression_dl
-    _tdg.time_aggression_nnue_dyn = _td.time_aggression_nnue
-    _tdg.time_aggression_rescue_dyn = _td.time_aggression_rescue
+    _time_dyn.time_aggression = _td.time_aggression
+    _time_dyn.time_aggression_dl_dyn = _td.time_aggression_dl
+    _time_dyn.time_aggression_nnue_dyn = _td.time_aggression_nnue
+    _time_dyn.time_aggression_rescue_dyn = _td.time_aggression_rescue
     ctx.time_aggression.writeback_from_dynamics(_td)
-    if abs(_tdg.time_aggression - _time_aggression_prev) > 0.001:
+    if abs(_time_dyn.time_aggression - _time_aggression_prev) > 0.001:
         _flog(
             f"time_aggression[{label}]: base={_time_aggression_base:.2f} "
             f"score_cp={_score_cp_cur} remaining={_our_remaining_ms}ms "
             f"guaranteed={_guaranteed_ms:.0f}ms game_phase={_game_phase_for_ta:.3f}"
             f"{'(→' + f'{_game_phase_for_ta_folded:.3f})' if _game_phase_for_ta > 1.0 else ''} "
-            f"→ {_tdg.time_aggression:.3f}"
+            f"→ {_time_dyn.time_aggression:.3f}"
         )
     if _td.dl_time_ratio is not None:
-        _tdg.dl_time_ratio = _td.dl_time_ratio
+        _time_dyn.dl_time_ratio = _td.dl_time_ratio
     if _td.dl_time_max_ms is not None:
-        _tdg.dl_time_max_ms = _td.dl_time_max_ms
+        _time_dyn.dl_time_max_ms = _td.dl_time_max_ms
         if _td.dl_time_fallback_ms is not None:
-            _tdg.dl_time_fallback_ms = _td.dl_time_fallback_ms
+            _time_dyn.dl_time_fallback_ms = _td.dl_time_fallback_ms
         if _td.dl_2_time_max_ms is not None:
-            _tdg.dl_2_time_max_ms = _td.dl_2_time_max_ms
+            _time_dyn.dl_2_time_max_ms = _td.dl_2_time_max_ms
     if _td.dl_2_margin_min_ms is not None:
-        _tdg.dl_2_margin_min_ms = _td.dl_2_margin_min_ms
+        _time_dyn.dl_2_margin_min_ms = _td.dl_2_margin_min_ms
     if _td.dl_3_rescue_eff_s_min is not None:
-        _tdg.dl_3_rescue_eff_s_min = _td.dl_3_rescue_eff_s_min
+        _time_dyn.dl_3_rescue_eff_s_min = _td.dl_3_rescue_eff_s_min
     if _td.dl_3_empty_eff_s_min is not None:
-        _tdg.dl_3_empty_eff_s_min = _td.dl_3_empty_eff_s_min
+        _time_dyn.dl_3_empty_eff_s_min = _td.dl_3_empty_eff_s_min
 
 
 def _handle_go(ctx, line):
     _go_tokens = line.split()
     if len(_go_tokens) >= 2 and _go_tokens[1] == "mate":
-        if ctx.mate_solver is not None and ctx.mate_solver._alive:
+        if _eng_alive(ctx.mate_solver):
             try:
                 ctx.mate_solver.send(ctx.current_position)
                 ctx.mate_solver.send(line)
@@ -19140,12 +19545,12 @@ def _handle_go(ctx, line):
                             print(_out, flush=True)
                         except OSError:
                             pass
-                        if _out.startswith("checkmate") or _out.startswith("bestmove"):
+                        if _out.startswith(("checkmate", "bestmove")):
                             break
                 threading.Thread(target=_forward_mate, daemon=True,
                                  name="go-mate-forward").start()
                 _flog(f"[GO-MATE] forwarded to mate_solver: {line!r}")
-                ctx.gps.council_agree_streak = 0
+                ctx.game_progress.council_agree_streak = 0
                 return
             except (KeyboardInterrupt, SystemExit, MemoryError):
                 raise
@@ -19155,13 +19560,13 @@ def _handle_go(ctx, line):
             print("checkmate notimplemented", flush=True)
             _flog("[GO-MATE] mate_solver unavailable — sent 'checkmate notimplemented'")
             return
-    if ctx.gps.ponder_arb_stop is not None:
+    if ctx.game_progress.ponder_arb_stop is not None:
         try:
-            ctx.gps.ponder_arb_stop.set()
+            ctx.game_progress.ponder_arb_stop.set()
         except Exception as _ie:
             _flog(f"[ignored] _handle_go: {_ie!r}")
-    ctx.gps.ponder_arb_pred = None
-    ctx.gps.ponder_arb_pred_dl = None
+    ctx.game_progress.ponder_arb_pred = None
+    ctx.game_progress.ponder_arb_pred_dl = None
     try:
         _dlponder_bm = _DLPONDER_STATE.get("bm_ts")
         if _dlponder_bm is not None:
@@ -19172,30 +19577,36 @@ def _handle_go(ctx, line):
     except Exception as _ie:
         _flog(f"[ignored] _handle_go: {_ie!r}")
     _diag_reset()
-    ctx.gps._rep_council_done = False
+    ctx.game_progress._rep_council_done = False
     _assert_turn_integrity(ctx.current_position, "go")
-    if _dl_ponder_enable:
-        _harvest_mp_alt_on_go(ctx)
-        _stop_dl_ponders(ctx, "go ponder-miss/fresh-go")
-    _mate_ponder_cancel(ctx, "go")
     is_infinite = "infinite" in line
     move_count  = _count_moves(ctx.current_position)
+    _clock_base, _fischer_cap, _dl_skip = None, False, False
+    if not is_infinite:
+        _clock_base, _fischer_cap, _dl_skip = _parse_go_clock_base(line, move_count, cfg=ctx.cfg)
+    _eff_s_go = _clock_base.eff_s if (_clock_base is not None and _clock_base.eff_s > 0) else 0.0
+    if _dl_ponder_enable:
+        _harvest_mp_alt_on_go(ctx, eff_s=_eff_s_go)
+        _stop_dl_ponders(ctx, "go ponder-miss/fresh-go", eff_s=_eff_s_go)
+    _mate_ponder_cancel(ctx, "go")
+    if getattr(ctx.ps, "nnue1_ponder_sent", False):
+        _stop_nnue_ponders(ctx, "go fresh-go nnue-drain")
     _opponent_id_observe(ctx, ctx.current_position)
     if not is_infinite:
         ctx.ps.go_line = line
 
     if not ctx.nnue_1._alive:
-        _ro_nnue1 = 60
+        _readyok_to = 60
         _gc_dead = None
         if not is_infinite:
             try:
-                _gc_dead, _, _ = _parse_go_clock_base(line)
+                _gc_dead, _, _ = _parse_go_clock_base(line, cfg=ctx.cfg)
                 _rem_s = (_gc_dead.remaining_ms / 1000.0 - _move_overhead_s) if _gc_dead.remaining_ms else 0.0
                 _ef = max(0.0, _gc_dead.eff_s or 0.0)
-                _ro_nnue1 = max(_move_overhead_s, min(60.0, max(_ef * 2.0, _rem_s * 0.5)))
+                _readyok_to = _clamp(max(_ef * 2.0, _rem_s * 0.5), _move_overhead_s, 60.0)
             except Exception:
-                _ro_nnue1 = 30
-        _ok_restart = _restart_nnue_1(ctx, "go", readyok_timeout=_ro_nnue1)
+                _readyok_to = 30
+        _ok_restart = _restart_nnue_1(ctx, "go", readyok_timeout=_readyok_to)
         if not _ok_restart or not ctx.nnue_1._alive:
             _flog("go: ctx.nnue_1 restart failed — delegating this move to a "
                   "surviving engine (resign avoided)")
@@ -19205,56 +19616,78 @@ def _handle_go(ctx, line):
             except Exception as _ge:
                 _flog(f"go: emergency move raised (ignored): {_ge}")
             if _emerg:
+                try:
+                    _emr = _build_move_record({
+                        "ply": _count_moves(ctx.current_position),
+                        "council_winner": _emerg,
+                        "nnue_bestmove": _emerg,
+                        "source": "emergency",
+                    })
+                    _append_move_record(ctx, _emr)
+                except Exception as _emr_e:
+                    _flog(f"go: emergency stats write failed (ignored): {_emr_e}")
                 _safe_bestmove(_emerg)
                 _flog(f"go: nnue_1 dead — EMERGENCY move {_emerg!r} from surviving "
                       "engine (resign avoided)")
                 return
             try:
                 if _gc_dead is None:
-                    _gc_dead, _, _ = _parse_go_clock_base(line)
+                    _gc_dead, _, _ = _parse_go_clock_base(line, cfg=ctx.cfg)
                 _wv_rem = (_gc_dead.remaining_ms or 0) / 1000.0 - _move_overhead_s
                 _wv_eff = max(0.0, _gc_dead.eff_s or 0.0)
-                _wv_deadline = max(0.5, min(_wv_rem if _wv_rem > 0 else 9999.0,
-                                            max(_wv_eff, 3.0)))
+                _wv_deadline = _clamp(
+                    max(_wv_eff, 3.0), 0.5,
+                    _wv_rem if _wv_rem > 0 else 9999.0)
             except Exception:
                 _wv_deadline = 3.0
             _wait_mv = _wait_revive_nnue_and_move(ctx, caller="go", deadline_s=_wv_deadline)
             if _wait_mv:
+                try:
+                    _record = _build_move_record({
+                        "ply": _count_moves(ctx.current_position),
+                        "council_winner": _wait_mv,
+                        "nnue_bestmove": _wait_mv,
+                        "source": "wait_revive",
+                    })
+                    _append_move_record(ctx, _record)
+                except Exception:
+                    pass
                 _safe_bestmove(_wait_mv)
                 return
             _flog("go: no surviving engine and nnue revive failed — resign")
             _safe_bestmove("resign")
             return
 
-    _clock_base, _fischer_cap, _dl_skip = _parse_go_clock_base(line, move_count)
+    if _clock_base is None:
+        _clock_base, _fischer_cap, _dl_skip = _parse_go_clock_base(line, move_count, cfg=ctx.cfg)
 
-    _dlrc_to = None if is_infinite else _restart_child_budget_s(_clock_base)
+    _restart_timeout = None if is_infinite else _restart_child_budget_s(_clock_base)
     if not ctx.dl_1._alive:
-        _restart_child(ctx, "dl_1", "go", readyok_timeout=_dlrc_to)
+        _restart_child(ctx, "dl_1", "go", readyok_timeout=_restart_timeout)
     if ctx.cfg.dl_2_enable and ctx.dl_2 is not None and not ctx.dl_2._alive:
-        _restart_child(ctx, "dl_2", "go", readyok_timeout=_dlrc_to)
+        _restart_child(ctx, "dl_2", "go", readyok_timeout=_restart_timeout)
 
-    ctx.gps.book_seed_move   = None
-    ctx.gps.book_seed_weight = 0.0
-    ctx.gps.book_seed_trust  = ""
+    ctx.game_progress.book_seed_move   = None
+    ctx.game_progress.book_seed_weight = 0.0
+    ctx.game_progress.book_seed_trust  = ""
     _book_avail = (_book_enabled and not is_infinite and (
-        (ctx.book is not None and ctx.book._alive
+        (_eng_alive(ctx.book)
          and ctx.book_state.active and ctx.book_state.initialized)
-        or (ctx.book2 is not None and ctx.book2._alive
+        or (_eng_alive(ctx.book2)
             and ctx.book2_state.active and ctx.book2_state.initialized)
         or (ctx.book_state.consec >= ctx.cfg.book2_fire_consec)))
     if _book_avail:
         _book_move, _book_trust = _book_consult(ctx, ctx.current_position)
         if _book_move:
-            if _book_trust == "absolute":
+            if _book_trust == _TRUST_ABSOLUTE:
                 _safe_bestmove(_book_move, label="book",
                                nnue_info={"score_cp": 0, "depth": 0, "pv": ""})
                 _flog(f"[bookloader] bestmove (book) {_book_move!r} "
                       f"ply={move_count} trust={_book_trust} "
                       f"— council/nnue 探索をスキップ")
-                _bk_gp = _calc_game_phase(
+                book_gp = _calc_game_phase(
                     ctx.current_position, ctx.cfg) if ctx.current_position else None
-                _bk_rec = _build_move_record({
+                book_rec = _build_move_record({
                     "ply": move_count,
                     "council_winner": _book_move,
                     "nnue_bestmove": _book_move,
@@ -19262,47 +19695,47 @@ def _handle_go(ctx, line):
                     "book_trust": _book_trust,
                     "go_line": line,
                     "ctx.endgame_mode": ctx.endgame_mode,
-                    "game_phase": _bk_gp,
+                    "game_phase": book_gp,
                     "game_phase_delta": _calc_game_phase_delta(
-                        _bk_gp, ctx.gps.last_game_phase),
+                        book_gp, ctx.game_progress.last_game_phase),
                 })
                 try:
-                    _append_move_record(ctx, _bk_rec)
+                    _append_move_record(ctx, book_rec)
                 except Exception as _bre:
                     _flog(f"[ignored] book move record: {_bre}")
                 if _LIVE._ready():
-                    _LIVE.set_think(_bk_rec, ctx.current_position, None)
-                ctx.gps.last_child_agreement = None
-                ctx.gps.last_nnue_mate_ply = None
-                ctx.gps.last_game_phase = _calc_game_phase(
-                    ctx.current_position, ctx.cfg) if ctx.current_position else ctx.gps.last_game_phase
-                ctx.gps.council_agree_streak = 0
-                ctx.gps.opponent_id_last_sample = None
-                ctx.gps.ponder_arb_pred = None
-                ctx.gps.ponder_arb_pred_dl = None
+                    _LIVE.set_think(book_rec, ctx.current_position, None)
+                ctx.game_progress.last_child_agreement = None
+                ctx.game_progress.last_nnue_mate_ply = None
+                ctx.game_progress.last_game_phase = _calc_game_phase(
+                    ctx.current_position, ctx.cfg) if ctx.current_position else ctx.game_progress.last_game_phase
+                ctx.game_progress.council_agree_streak = 0
+                ctx.game_progress.opponent_id_last_sample = None
+                ctx.game_progress.ponder_arb_pred = None
+                ctx.game_progress.ponder_arb_pred_dl = None
                 _apply_time_dynamics(ctx, line, move_count, label="book",
                                      clock_base=_clock_base)
                 ctx.ps.go_clock = _clock_base
                 return
             _book_bias = _book_council_bias_for_trust(_book_trust, ctx.cfg)
-            ctx.gps.book_seed_move   = _book_move
-            ctx.gps.book_seed_weight = _book_bias
-            ctx.gps.book_seed_trust  = _book_trust
+            ctx.game_progress.book_seed_move   = _book_move
+            ctx.game_progress.book_seed_weight = _book_bias
+            ctx.game_progress.book_seed_trust  = _book_trust
             _flog(f"[bookloader] 定跡 seed 注入 move={_book_move!r} "
                   f"trust={_book_trust} weight={_book_bias:.3f} ply={move_count} "
                   f"— council で検討 (劣勢なら council 勝者を採用)")
 
     if (ctx.dl_3 is not None
-            and ctx.gps.dl_3_readyok_streak >= _DL3_RESTART_STREAK_THRESHOLD):
-        _restart_child(ctx, "dl_3", "go", readyok_timeout=_dlrc_to)
+            and ctx.game_progress.dl_3_readyok_streak >= _DL3_RESTART_STREAK_THRESHOLD):
+        _restart_child(ctx, "dl_3", "go", readyok_timeout=_restart_timeout)
     if (not ctx._zyfamate and ctx.mate_solver is not None
             and not ctx.mate_solver._alive):
-        _restart_child(ctx, "mate_solver", "go", readyok_timeout=_dlrc_to)
+        _restart_child(ctx, "mate_solver", "go", readyok_timeout=_restart_timeout)
 
     _apply_time_dynamics(ctx, line, move_count, label="go", clock_base=_clock_base)
 
     _dl_timeout_s = _compute_dl_timeout_s(
-        _clock_base, score_cp=ctx.gps.last_nnue_score_cp,
+        _clock_base, score_cp=ctx.game_progress.last_nnue_score_cp,
         fischer_cap_bound=_fischer_cap, dl_skip=_dl_skip)
     _go_clock_main = _clock_base._replace(dl_timeout_s=_dl_timeout_s)
     ctx.ps.go_clock = _go_clock_main
@@ -19328,8 +19761,8 @@ def _handle_go(ctx, line):
             and ctx.dl_1._alive
             and _endgame_decision == "deactivate"
             and _zmf_decision != "hold"):
-        _last_sc = abs(int(ctx.gps.last_nnue_score_cp or 0))
-        _mate_active = _last_sc >= 29000
+        _last_sc = abs(int(ctx.game_progress.last_nnue_score_cp or 0))
+        _mate_active = _last_sc >= _MATE_SCORE_CP
         if not _mate_active:
             _deactivate_endgame(ctx,
                 move_count=move_count, cur_game_phase=_cur_game_phase,
@@ -19378,7 +19811,7 @@ def _handle_go(ctx, line):
               and _eff_s_go is not None
               and _eff_s_go >= ctx.cfg.light_council_min_eff_s
               and ctx.cfg.light_council_enable
-              and ctx.dl_3 is not None and ctx.dl_3._alive):
+              and _eng_alive(ctx.dl_3)):
             _dlog("[MODE] eff_s=%.2f < min_eff_s=%.2f だが Light Council 動作可能 "
                   "(eff_s >= lc_min=%.2f, DL_3 alive) — endgame 抑止し council 維持"
                   % (_eff_s_go, ctx.cfg.endgame_min_eff_s, ctx.cfg.light_council_min_eff_s))
@@ -19393,12 +19826,12 @@ def _handle_go(ctx, line):
                   " — 残時間床。配当機構ごと nnue 専任へ)"
                   % (move_count, _eff_s_go, ctx.cfg.endgame_min_eff_s))
 
-    use_dl, use_light_council, _dl_timeout_threshold_s, _dispatch_reason = \
+    use_dl, use_light_council, _dl_timeout_threshold_s, _ = \
         _lc_dispatch_core(
             is_infinite, ctx.endgame_mode, ctx.dl_1._alive,
             _cur_game_phase, _handover_game_phase, _book_active_now,
             dl_timeout, _eff_s_go,
-            (ctx.dl_3 is not None and ctx.dl_3._alive),
+            (_eng_alive(ctx.dl_3)),
             ctx.cfg)
 
     if use_light_council:
@@ -19415,24 +19848,24 @@ def _handle_go(ctx, line):
                             use_dl,
                             go_clock=_go_clock_main)
     else:
-        _dl_3_hit_now = ctx.gps.dl_3_rescue_pending
-        ctx.gps.dl_3_rescue_pending = False
-        if ctx.gps.book_seed_move is not None:
-            _flog(f"[bookloader] 定跡 seed={ctx.gps.book_seed_move!r} "
-                  f"trust={ctx.gps.book_seed_trust} を破棄 — nnue 専任経路 "
+        _dl_3_hit_now = ctx.game_progress.dl_3_rescue_pending
+        ctx.game_progress.dl_3_rescue_pending = False
+        if ctx.game_progress.book_seed_move is not None:
+            _flog(f"[bookloader] 定跡 seed={ctx.game_progress.book_seed_move!r} "
+                  f"trust={ctx.game_progress.book_seed_trust} を破棄 — nnue 専任経路 "
                   f"(council 不在) のため検討不能。純粋探索に委譲。")
-            ctx.gps.book_seed_move   = None
-            ctx.gps.book_seed_weight = 0.0
-            ctx.gps.book_seed_trust  = ""
+            ctx.game_progress.book_seed_move   = None
+            ctx.game_progress.book_seed_weight = 0.0
+            ctx.game_progress.book_seed_trust  = ""
         _run_endgame_search(ctx, line, move_count, is_infinite,
                               _dl_3_ponder_hit=_dl_3_hit_now,
                               go_clock=_go_clock_main)
     if not is_infinite:
-        ctx.gps.first_search_done = True
+        ctx.game_progress.first_search_done = True
 
 
-def _ponderhit_collect_sp_early(eng, caller="ponderhit", grace_s=0.30):
-    if eng is None or not getattr(eng, "_alive", False):
+def _drain_sp_early_bestmove(eng, caller="ponderhit", grace_s=0.30):
+    if eng is None or not _eng_alive(eng):
         return None, None, {}
     nnue_info = {}
     _deadline = time.perf_counter() + max(0.0, grace_s)
@@ -19440,7 +19873,7 @@ def _ponderhit_collect_sp_early(eng, caller="ponderhit", grace_s=0.30):
         _has_q = hasattr(eng, "_q") and eng._q.qsize() > 0
         if not _has_q and time.perf_counter() >= _deadline:
             break
-        _to = 0.0 if _has_q else min(0.05, max(0.0, _deadline - time.perf_counter()))
+        _to = 0.0 if _has_q else _clamp(_deadline - time.perf_counter(), 0.0, 0.05)
         out = eng.readline(timeout=_to)
         if out is None:
             return None, None, {}
@@ -19448,7 +19881,7 @@ def _ponderhit_collect_sp_early(eng, caller="ponderhit", grace_s=0.30):
             if time.perf_counter() >= _deadline:
                 break
             continue
-        if out.startswith("info") and "depth" in out and "score" in out:
+        if _is_scored_info(out):
             _dm = _RE_DEPTH.search(out)
             _d = int(_dm.group(1)) if _dm else 0
             if _d >= nnue_info.get("depth", -1):
@@ -19459,7 +19892,7 @@ def _ponderhit_collect_sp_early(eng, caller="ponderhit", grace_s=0.30):
                 else:
                     _mm = _RE_MATE.search(out)
                     if _mm:
-                        nnue_info["score_cp"] = 30000 if int(_mm.group(1)) > 0 else -30000
+                        nnue_info["score_cp"] = _mate_sign_score(int(_mm.group(1)))
                         nnue_info["mate_ply"] = int(_mm.group(1))
             continue
         if out.startswith("bestmove"):
@@ -19493,7 +19926,7 @@ def _ponderhit_restart_nnue1_and_movetime(ctx, position_cmd, move_count, eff_s,
     _movetime_ms = max(500, int(eff_s * 200))
     if apply_slowmover and ponder_line is not None:
         _apply_slow_mover(ctx.nnue_1, _nnue_1_opts,
-                          _nnue_slowmover_user_set,
+                          ctx.cfg.nnue_slowmover_user_set,
                           slowmover_label or restart_caller,
                           eff_s=eff_s, cfg=ctx.cfg)
     ctx.nnue_1.send(position_cmd)
@@ -19510,26 +19943,76 @@ def _ponderhit_try_collect_sp_early(ctx, position_cmd, eff_s, caller):
     if not (ctx.ps.position is not None and ctx.ps.position == position_cmd
             and str(_nnue_1_opts.get("Stochastic_Ponder", "true")) == "true"):
         return None
-    _grace_s = (min(0.30, max(0.05, eff_s * 0.05))
+    _grace_s = (_clamp(eff_s * 0.05, 0.05, 0.30)
                 if eff_s and eff_s > 0 else 0.30)
-    _sp_bm, _sp_pd, _sp_ni = _ponderhit_collect_sp_early(ctx.nnue_1, caller,
+    _sp_bm, _sp_pd, _sp_ni = _drain_sp_early_bestmove(ctx.nnue_1, caller,
                                                   grace_s=_grace_s)
     if not _sp_bm:
         return None
+    if not ctx.nnue_1.bm_is_current():
+        _flog(f"[{caller}/SP-GEN] early bestmove {_sp_bm!r} is stale "
+              f"(bm_seen={ctx.nnue_1._bm_seen} go_sent={ctx.nnue_1._go_sent}) — rejecting")
+        _spd = ctx.game_progress.sp_move_diag
+        if _spd is None:
+            _spd = {}
+            ctx.game_progress.sp_move_diag = _spd
+        _spd["sp_gen_rejected"] = _spd.get("sp_gen_rejected", 0) + 1
+        return None
     _sp_track_board = _get_tracking_board(ctx)
+    _sp_board_attr = None
+    if _sp_track_board is not None:
+        _own_legal = _bestmove_is_for_board(_sp_bm, _sp_track_board)
+        _sp_board_attr = "own" if _own_legal else "none"
     if _sp_track_board is not None and not _bestmove_is_for_board(_sp_bm, _sp_track_board):
         _flog(f"[{caller}/SP-echo] collected early bestmove {_sp_bm!r} is not a "
               "move for the current board — rejecting, fall through to ponderhit relay")
         _phit_trace("sp_echo_reject", bm=_sp_bm)
+        _spd = ctx.game_progress.sp_move_diag
+        if _spd is not None:
+            _spd["sp_echo_rejected"] = _spd.get("sp_echo_rejected", 0) + 1
         return None
+    _spd = ctx.game_progress.sp_move_diag
+    if _spd is None:
+        _spd = {}
+        ctx.game_progress.sp_move_diag = _spd
+    _spd["sp_early_collected"] = True
+    _spd["sp_early_depth"] = _sp_ni.get("depth") if _sp_ni else None
+    _spd["sp_early_board"] = _sp_board_attr
     ctx.ps.active = False
     ctx.ps.nnue1_ponder_sent = False
-    _sp_flush_to = min(2.0, max(0.3, eff_s * 0.2)) if eff_s and eff_s > 0 else 2.0
-    if not ctx.nnue_1.flush_until_ready(timeout=_sp_flush_to, max_stale_lines=50):
-        _flog(f"[{caller}/SP-sync] flush_until_ready failed after "
-              "SP-early collection — nnue_1 may not be cleanly idle "
-              "(desync risk)")
+    _flush_or_mark_dirty(ctx, f"{caller}/SP-sync", eff_s)
     return _sp_bm, _sp_pd, _sp_ni
+
+
+def _mark_nnue1_flush_failure(ctx, caller):
+    ctx.ps.nnue1_dirty = True
+    _flog(f"[{caller}/SP-DIRTY] flush_until_ready failed — nnue_1 marked "
+          "dirty; will resync before next go ponder")
+
+
+def _flush_or_mark_dirty(ctx, caller, eff_s, max_stale_lines=50):
+    _to = _clamp((eff_s or 0) * 0.2, 0.3, 2.0) if eff_s else 2.0
+    ok = ctx.nnue_1.flush_until_ready(timeout=_to, max_stale_lines=max_stale_lines)
+    if not ok:
+        _mark_nnue1_flush_failure(ctx, caller)
+        _phit_trace(f"{caller}_flush_fail")
+    return ok
+
+
+def _assert_sp_consistency(ctx, when):
+    _expect = {
+        "nnue_1": str(_cfg["nnue_1_Stochastic_Ponder"]) if _early_ponder else "false",
+        "nnue_2": "false",
+    }
+    for _name, _want in _expect.items():
+        _cache = _nnue_1_opts if _name == "nnue_1" else _endgame_opts
+        _got = _cache.get("Stochastic_Ponder")
+        if _got is None:
+            continue
+        if _got != _want and not (_name == "nnue_1" and _got == "false"
+                                  and when == "post-restart"):
+            _flog(f"[SP-CONSISTENCY] {when}: {_name} cache={_got!r} "
+                  f"expected={_want!r}")
 
 
 
@@ -19561,7 +20044,7 @@ def _ponder_conf_cap_factor_core(level, conv_f, high_f, medium_f, low_f, floor):
         f = float(table.get(level, 1.0))
     except (TypeError, ValueError):
         return 1.0, None
-    f = max(float(floor), min(1.0, f))
+    f = _clamp(f, float(floor), 1.0)
     if f >= 1.0:
         return 1.0, None
     return f, f"{level} x{f:.2f}"
@@ -19577,7 +20060,7 @@ def _harvest_one_dl_ponder(eng, n, timeout_s, label, *, cfg=None):
     score_hist    = {}
     mate_detected = False
     _got_bestmove = False
-    for line in eng.read_until("bestmove", timeout=timeout_s):
+    for line in eng.iter_until("bestmove", timeout=timeout_s):
         if "bestmove" in line:
             _got_bestmove = True
         mm = _RE_MATE.search(line)
@@ -19591,7 +20074,7 @@ def _harvest_one_dl_ponder(eng, n, timeout_s, label, *, cfg=None):
         if sm:
             score = int(sm.group(1))
         if mm:
-            score = 30000 if int(mm.group(1)) > 0 else -30000
+            score = _mate_sign_score(int(mm.group(1)))
         pv_m = _RE_PV_FULL.search(line)
         if not pv_m:
             continue
@@ -19645,8 +20128,8 @@ def _harvest_dl_ponders(ctx, position_cmd, eff_s=None):
     _DLPONDER_STATE["dlp_hits" if _pos_match else "dlp_misses"] = \
         int(_DLPONDER_STATE.get("dlp_hits" if _pos_match else "dlp_misses", 0)) + 1
 
-    _dl1_ok = (_want_dl1 and ctx.dl_1 is not None and ctx.dl_1._alive)
-    _dl2_ok = (_want_dl2 and ctx.dl_2 is not None and ctx.dl_2._alive)
+    _dl1_ok = (_want_dl1 and _eng_alive(ctx.dl_1))
+    _dl2_ok = (_want_dl2 and _eng_alive(ctx.dl_2))
     for _eng, _ok in ((ctx.dl_1, _dl1_ok), (ctx.dl_2, _dl2_ok)):
         if _ok:
             try:
@@ -19655,7 +20138,7 @@ def _harvest_dl_ponders(ctx, position_cmd, eff_s=None):
                 _flog(f"[ignored] harvest stop {_eng.name}: {_fe}")
     if ctx.ps.dl3_ponder_sent:
         ctx.ps.dl3_ponder_sent = False
-        if ctx.dl_3 is not None and ctx.dl_3._alive:
+        if _eng_alive(ctx.dl_3):
             try:
                 ctx.dl_3.send("stop")
                 _d3 = ctx.dl_3
@@ -19672,9 +20155,11 @@ def _harvest_dl_ponders(ctx, position_cmd, eff_s=None):
         ctx.ps.dl2_ponder_pos = None
         return False
     ctx.ps.dl_ponder_pos = None
+    if _pondered_dl2 is not None and not _pos_match_dl2:
+        _DLPONDER_STATE["dl2_alt_residue"] =             int(_DLPONDER_STATE.get("dl2_alt_residue", 0)) + 1
     ctx.ps.dl2_ponder_pos = None
 
-    _h_timeout = min(1.5, max(0.3, (eff_s or 0.0) * 0.25)) if eff_s else 1.0
+    _h_timeout = _clamp((eff_s or 0.0) * 0.25, 0.3, 1.5) if eff_s else 1.0
     _t0 = time.perf_counter()
     _injected = False
 
@@ -19695,11 +20180,11 @@ def _harvest_dl_ponders(ctx, position_cmd, eff_s=None):
                   f"gap={_r1[2]} moves={len(_r1[4])}")
             _dl_ponder_bm = _r1[0][0][0] if _r1[0] else None
             if _audb_top is not None:
-                ctx.gps.ponder_move_dl       = _audb_top
-                ctx.gps.ponder_prefetch_corr = (_audb_top == _dl_ponder_bm) if _dl_ponder_bm else None
+                ctx.game_progress.ponder_move_dl       = _audb_top
+                ctx.game_progress.ponder_prefetch_corr = (_audb_top == _dl_ponder_bm) if _dl_ponder_bm else None
             else:
-                ctx.gps.ponder_move_dl       = _dl_ponder_bm
-                ctx.gps.ponder_prefetch_corr = None
+                ctx.game_progress.ponder_move_dl       = _dl_ponder_bm
+                ctx.game_progress.ponder_prefetch_corr = None
 
     if _dl2_ok and _pos_match_dl2:
         _h2_timeout = max(0.2, _h_timeout - (time.perf_counter() - _t0))
@@ -19717,10 +20202,11 @@ def _harvest_dl_ponders(ctx, position_cmd, eff_s=None):
 
 def _ponderhit_preamble(ctx, line):
     _diag_reset()
+    ctx.game_progress.decided_latched = False
     ctx.nnue_1._live_info_cb = None
-    if ctx.dl_1 is not None and ctx.dl_1._alive:
+    if _eng_alive(ctx.dl_1):
         ctx.dl_1._live_info_cb = _make_dl1_multipv_cb(ctx, ctx.current_position)
-    elif ctx.dl_2 is not None and ctx.dl_2._alive:
+    elif _eng_alive(ctx.dl_2):
         ctx.dl_2._live_info_cb = _make_dl1_multipv_cb(ctx, ctx.current_position)
     _mate_ponder_cancel(ctx, "ponderhit")
     if not ctx.ps.active and not ctx.ps.mate_skip_pending:
@@ -19736,12 +20222,12 @@ def _ponderhit_preamble(ctx, line):
     _assert_position_integrity(ctx.ps.position, ctx.current_position, "ponderhit")
 
     if ctx.ps.ponder_line:
-        _ponderhit_clock_updated, _, _ = _parse_go_clock_base(ctx.ps.ponder_line, mc_raw)
+        _ponderhit_clock_updated, _, _ = _parse_go_clock_base(ctx.ps.ponder_line, mc_raw, cfg=ctx.cfg)
         if _ponderhit_clock_updated.eff_s > 0:
             ctx.ps.ponder_clock = _ponderhit_clock_updated
             try:
                 ctx.ps.ponder_clock_opp, _, _ = _parse_go_clock_base(
-                    ctx.ps.ponder_line, mc_raw - 1)
+                    ctx.ps.ponder_line, mc_raw - 1, cfg=ctx.cfg)
             except Exception:
                 pass
             _dlog("[PH-CLOCK-PATCH] ponder_clock updated: eff_s=%.3fs remaining_ms=%s"
@@ -19756,7 +20242,7 @@ def _ponderhit_preamble(ctx, line):
         _flog(f"[PH-TA-REFRESH] failed (non-fatal): {type(_ta_e).__name__}: {_ta_e!r}")
 
     ponderhit_pv_holder = [None]
-    ctx.gps.ponderhit_emit_ni = None
+    ctx.game_progress.ponderhit_emit_ni = None
     return mc_raw, position_cmd, ponderhit_pv_holder
 
 
@@ -19767,7 +20253,7 @@ def _ponderhit_handle_mate_skip(ctx, position_cmd, move_count):
     last_score = None
     if ctx.game_log:
         last_score = ctx.game_log[-1].get("nnue_score_cp")
-    if last_score is None or abs(last_score) < 30000:
+    if last_score is None or abs(last_score) < _MATE_CP:
         return None
 
     _dlog("[PH-MATE-SKIP] last_score=%d — skipping full ponderhit" % last_score)
@@ -19788,27 +20274,22 @@ def _ponderhit_handle_mate_skip(ctx, position_cmd, move_count):
         eng, timeout=max(3.0, ctx.cfg.mate_skip_emergency_movetime_ms / 1000.0 + 2.0),
         intercept_bestmove=True,
     )
-    bestmove = ni.get("bestmove", "") if ni else ""
-    ponder = ni.get("ponder") if ni else None
+    bestmove, ponder = _unpack_bestmove(ni)
+    _emit_ni = ni
     _phit_trace("mate_skip_relay", bm=bestmove or "-")
 
-    if bestmove:
-        _ms_board = _get_tracking_board(ctx)
-        if (_ms_board is not None
-                and not _bestmove_is_for_board(bestmove, _ms_board)):
-            _flog("[PH-MATE-SKIP/SP-echo] relay bestmove %r is not a move for "
-                  "the current board — dropping (stale residue)" % bestmove)
-            _phit_trace("echo_reject", bm=bestmove)
-            bestmove = ""
-            ponder = None
+    if _sp_echo_reject(ctx, bestmove, "PH-MATE-SKIP"):
+        _phit_trace("echo_reject", bm=bestmove)
+        bestmove = ""
+        ponder = None
 
     def _mate_skip_drop_ok(_mv):
         if not _mv or "*" not in _mv:
             return True
-        _b = _get_tracking_board(ctx)
-        if _b is None:
+        _board = _get_tracking_board(ctx)
+        if _board is None:
             return True
-        _r = _b.illegal_drop_reason(_mv)
+        _r = _board.illegal_drop_reason(_mv)
         if _r:
             _flog("[PH-MATE-SKIP] rejected illegal drop %s (reason=%s) — "
                   "not accepting stale move" % (_mv, _r))
@@ -19831,21 +20312,17 @@ def _ponderhit_handle_mate_skip(ctx, position_cmd, move_count):
                         or None)
         if _fb_move and not _mate_skip_drop_ok(_fb_move):
             _fb_move = None
-        if _fb_move:
-            _fb_board = _get_tracking_board(ctx)
-            if (_fb_board is not None
-                    and not _bestmove_is_for_board(_fb_move, _fb_board)):
-                _flog("[PH-MATE-SKIP/SP-echo] fallback %r is not a move for "
-                      "the current board — dropped" % _fb_move)
-                _fb_move = None
+        if _sp_echo_reject(ctx, _fb_move, "PH-MATE-SKIP"):
+            _fb_move = None
         if _fb_move:
             bestmove = _fb_move
+            _emit_ni = None
             _dlog("[PH-MATE-SKIP] fallback bestmove from game_log.ponder: %s"
                   % bestmove)
         else:
             _dlog("[PH-MATE-SKIP] no fallback available — returning empty (resign path)")
 
-    _ponderhit_capture_emit_ni(ctx, ni, bestmove)
+    _ponderhit_capture_emit_ni(ctx, _emit_ni, bestmove)
 
     return bestmove, ponder
 
@@ -19880,22 +20357,18 @@ def _ponderhit_handle_stale(ctx, position_cmd, move_count):
                              kill_on_empty=False)
         if ctx.nnue_1._alive:
             _pc_eff = ctx.ps.ponder_clock.eff_s if ctx.ps.ponder_clock else 0
-            _flush_to = min(2.0, max(0.3, _pc_eff * 0.2)) if _pc_eff > 0 else 2.0
-            if not ctx.nnue_1.flush_until_ready(timeout=_flush_to, max_stale_lines=50):
-                _flog("[PH-STALE/SP-sync] flush_until_ready failed — "
-                      "nnue_1 may not be cleanly idle (desync risk)")
-                _phit_trace("stale_flush_fail")
+            _flush_or_mark_dirty(ctx, "PH-STALE", _pc_eff)
 
     go_clock = ctx.ps.ponder_clock
     _clock_rem_ms = go_clock.remaining_ms if go_clock is not None else None
     if go_clock is not None:
         _stale_eff_s = go_clock.eff_s
-        _stale_search_r = _lerp(0.72, 0.88, _tdg.time_aggression)
-        _stale_margin_r = _lerp(0.12, 0.28, _tdg.time_aggression)
+        _stale_search_r = _lerp(0.72, 0.88, _time_dyn.time_aggression)
+        _stale_margin_r = _lerp(0.12, 0.28, _time_dyn.time_aggression)
         movetime_ms = max(100,
                           int(_stale_eff_s * 1000 * _stale_search_r)
                           if _stale_eff_s > 0
-                          else int(_tdg.dl_time_fallback_ms * _stale_search_r))
+                          else int(_time_dyn.dl_time_fallback_ms * _stale_search_r))
         relay_timeout_s = movetime_ms / 1000.0 + max(0.5, _stale_eff_s * _stale_margin_r)
         movetime_ms = int(movetime_ms * 1.5)
     else:
@@ -19906,7 +20379,7 @@ def _ponderhit_handle_stale(ctx, position_cmd, move_count):
     recovery_line = "go movetime %d" % int(movetime_ms)
     _apply_slow_mover(
         ctx.nnue_1, _nnue_1_opts,
-        _nnue_slowmover_user_set, "nnue_1-ph-stale",
+        ctx.cfg.nnue_slowmover_user_set, "nnue_1-ph-stale",
         eff_s=go_clock.eff_s if go_clock else 1.0,
         cfg=ctx.cfg,
     )
@@ -19919,20 +20392,14 @@ def _ponderhit_handle_stale(ctx, position_cmd, move_count):
         intercept_bestmove=True,
     )
 
-    bestmove = ni.get("bestmove", "") if ni else ""
-    ponder = ni.get("ponder") if ni else None
+    bestmove, ponder = _unpack_bestmove(ni)
     _phit_trace("stale_research", bm=bestmove or "-")
 
-    if bestmove:
-        _st_board = _get_tracking_board(ctx)
-        if (_st_board is not None
-                and not _bestmove_is_for_board(bestmove, _st_board)):
-            _flog("[PH-STALE/SP-echo] recovery bestmove %r is not a move for "
-                  "the current board — dropping (phantom-go residue)" % bestmove)
-            _phit_trace("echo_reject", bm=bestmove)
-            bestmove = ""
-            ponder = None
-            ponderhit_pv_holder[0] = None
+    if _sp_echo_reject(ctx, bestmove, "PH-STALE"):
+        _phit_trace("echo_reject", bm=bestmove)
+        bestmove = ""
+        ponder = None
+        ponderhit_pv_holder[0] = None
 
     _dlog("[PH-STALE] recovery bestmove=%s ponder=%s movetime=%dms"
           % (bestmove, ponder, movetime_ms))
@@ -19958,15 +20425,15 @@ def _ponderhit_handle_cache_hit(ctx, position_cmd, move_count, ponderhit_pv_hold
     eff_s = go_clock.eff_s if go_clock is not None else 1.0
     _clock_rem_ms = go_clock.remaining_ms if go_clock is not None else None
     _game_phase_value = _calc_game_phase(position_cmd, cfg=ctx.cfg,
-                                         child_agreement=ctx.gps.last_child_agreement)
+                                         child_agreement=ctx.game_progress.last_child_agreement)
     _dlog(lambda: f"[GP/PonderHit-CacheHit] game_phase={_game_phase_value:.3f}")
 
 
     if ctx.endgame_mode:
         _dlog("[PH-CACHE-HIT] endgame_mode -- nnue-only search")
         if dl3_cache is not None:
-            ctx.gps.dl_3_rescue_pending = True
-            ctx.gps.dl_3_rescue_policy = dl3_cache
+            ctx.game_progress.dl_3_rescue_pending = True
+            ctx.game_progress.dl_3_rescue_policy = dl3_cache
             _dlog("[PH-CACHE-HIT] DL_3 prefetch cache HIT (endgame) → dl_3_rescue_pending=True")
         _ponderhit_pv = [None]
         _eng = ctx.nnue_1
@@ -19978,7 +20445,7 @@ def _ponderhit_handle_cache_hit(ctx, position_cmd, move_count, ponderhit_pv_hold
                 _sp_bm, _sp_pd, _sp_ni = _sp_result
                 _phit_trace("sp_early", bm=_sp_bm or "-")
                 _ponderhit_pv[0] = _sp_bm
-                ctx.gps.ponder_move_nnue = _sp_bm or None
+                ctx.game_progress.ponder_move_nnue = _sp_bm or None
                 _ponderhit_capture_emit_ni(ctx, _sp_ni, _sp_bm)
                 return _sp_bm, _sp_pd, _ponderhit_pv[0], {
                     "endgame": True,
@@ -19995,7 +20462,7 @@ def _ponderhit_handle_cache_hit(ctx, position_cmd, move_count, ponderhit_pv_hold
             _ponderhit_ponder_line = ctx.ps.ponder_line or ctx.ps.go_line
             if _ponderhit_ponder_line and go_clock:
                 _eg_relay_timeout = _ponderhit_calc_relay_timeout(
-                    _ponderhit_ponder_line, move_count, go_clock)
+                    _ponderhit_ponder_line, move_count, go_clock, cfg=ctx.cfg)
             else:
                 _eg_relay_timeout = max(10.0, eff_s * 2.0)
             _phit_trace("eg_relay_start", to="%.1f" % _eg_relay_timeout)
@@ -20010,7 +20477,7 @@ def _ponderhit_handle_cache_hit(ctx, position_cmd, move_count, ponderhit_pv_hold
             if _ponderhit_ponder_line.startswith("go ponder "):
                 _ponderhit_ponder_line = "go " + _ponderhit_ponder_line[10:]
             _apply_slow_mover(_eng, _nnue_1_opts,
-                              _nnue_slowmover_user_set, "nnue_1-ph-cache", eff_s=eff_s, cfg=ctx.cfg)
+                              ctx.cfg.nnue_slowmover_user_set, "nnue_1-ph-cache", eff_s=eff_s, cfg=ctx.cfg)
             _eng.send(position_cmd)
             _eng.send(_ponderhit_ponder_line)
             _pm, _ni = relay_until_bestmove(
@@ -20022,18 +20489,12 @@ def _ponderhit_handle_cache_hit(ctx, position_cmd, move_count, ponderhit_pv_hold
         _bm = _ni.get("bestmove", "") if _ni else ""
         _pd = _ni.get("ponder") if _ni else None
         _phit_trace("eg_relay_end", bm=_bm or "-")
-        if _bm:
-            _eg_track_board = _get_tracking_board(ctx)
-            if (_eg_track_board is not None
-                    and not _bestmove_is_for_board(_bm, _eg_track_board)):
-                _flog("[PH-HIT-EG/SP-echo] relay bestmove %r is not a move "
-                      "for the current board — rejecting, fall through to "
-                      "recovery re-search" % _bm)
-                _phit_trace("echo_reject", bm=_bm)
-                _bm = ""
-                _pd = None
-                _ni = None
-                _ponderhit_pv = [None]
+        if _sp_echo_reject(ctx, _bm, "PH-HIT-EG"):
+            _phit_trace("echo_reject", bm=_bm)
+            _bm = ""
+            _pd = None
+            _ni = None
+            _ponderhit_pv = [None]
         if not _bm:
             _flog("[PH-CACHE-HIT] endgame relay returned empty bestmove "
                   "(eng=%s alive=%s) — restart + re-search" % (_eng.name, _eng._alive))
@@ -20046,7 +20507,7 @@ def _ponderhit_handle_cache_hit(ctx, position_cmd, move_count, ponderhit_pv_hold
                                      intercept_bestmove=True,
                                      kill_on_empty=False)
                 if not _eng.flush_until_ready(
-                        timeout=min(2.0, max(0.3, eff_s * 0.2)),
+                        timeout=_clamp(eff_s * 0.2, 0.3, 2.0),
                         max_stale_lines=50):
                     _flog("[PH-HIT-EG] flush_until_ready failed before "
                           "re-search — re-search skipped (dirty pipe; "
@@ -20061,7 +20522,7 @@ def _ponderhit_handle_cache_hit(ctx, position_cmd, move_count, ponderhit_pv_hold
                     }
                 _rec_movetime_ms = max(500, int(eff_s * 200))
                 _rec_opts = _nnue_1_opts
-                _rec_userset = _nnue_slowmover_user_set
+                _rec_userset = ctx.cfg.nnue_slowmover_user_set
                 _apply_slow_mover(_eng, _rec_opts,
                                   _rec_userset, "nnue-only-ph-cache-recovery",
                                   eff_s=eff_s, cfg=ctx.cfg)
@@ -20069,31 +20530,83 @@ def _ponderhit_handle_cache_hit(ctx, position_cmd, move_count, ponderhit_pv_hold
                 _eng.send("go movetime %d" % _rec_movetime_ms)
                 _ponderhit_pv = [None]
                 _pm, _ni = relay_until_bestmove(
-                    _eng, timeout=_rec_movetime_ms / 1000.0 + max(0.5, min(3.0, eff_s * 0.5)),
+                    _eng, timeout=_rec_movetime_ms / 1000.0 + _clamp(eff_s * 0.5, 0.5, 3.0),
                     intercept_bestmove=True,
                     partial_pv_holder=_ponderhit_pv,
                     go_clock=go_clock)
                 _bm = _ni.get("bestmove", "") if _ni else ""
                 _pd = _ni.get("ponder") if _ni else None
                 _phit_trace("eg_research", bm=_bm or "-")
-                if _bm:
-                    _eg2_board = _get_tracking_board(ctx)
-                    if (_eg2_board is not None
-                            and not _bestmove_is_for_board(_bm, _eg2_board)):
-                        _flog("[PH-HIT-EG/SP-echo] recovery bestmove %r is not "
-                              "a move for the current board — dropping "
-                              "(phantom-go residue)" % _bm)
-                        _phit_trace("echo_reject2", bm=_bm)
-                        _bm = ""
-                        _pd = None
-                        _ni = None
-                        _ponderhit_pv = [None]
+                if _sp_echo_reject(ctx, _bm, "PH-HIT-EG"):
+                    _phit_trace("echo_reject2", bm=_bm)
+                    _bm = ""
+                    _pd = None
+                    _ni = None
+                    _ponderhit_pv = [None]
+        _ph_eg_veto_applied = False
+        _ph_eg_veto_dl_move = None
+        _ph_eg_arb_meta = None
+        if _bm and _bm not in ("resign", "win") and _ni:
+            _ph_eg_score_cp = _ni.get("score_cp")
+            _ph_veto_policy, _ph_veto_src = _select_veto_model(
+                ctx, eff_s, position_cmd, dl1_cache=dl1_cache)
+            _ph_veto_move, _ph_veto_meta = _endgame_dl_veto_check(
+                ctx, _bm, _ph_eg_score_cp, eff_s,
+                dl_policy=_ph_veto_policy, dl_src=_ph_veto_src)
+            if _ph_veto_move:
+                _ph_eg_arb_final = _ph_veto_move
+                _ph_eg_veto_dl_move = _ph_veto_move
+                if ctx.cfg.arb_enable:
+                    _ph_arb_live_cb = None
+                    if _LIVE._ready():
+                        _ph_arb_pos = position_cmd
+                        def _ph_arb_live_cb(score_cp, depth, pv):
+                            _LIVE.update_think_pv(pv=pv, score_cp=score_cp, pos=_ph_arb_pos)
+                    try:
+                        _ph_eg_arb_vote, _ph_eg_arb_meta = _council_arbitrate(
+                            ctx, position_cmd,
+                            nnue_move=_bm,
+                            dl_move=_ph_veto_move,
+                            game_phase=_game_phase_value,
+                            eff_s=eff_s,
+                            pre_boost_eff_s=eff_s,
+                            remaining_eff_ms=max(0.0, (_clock_rem_ms or 0)),
+                            clock_remaining_ms=_clock_rem_ms,
+                            move_overhead_ms=_move_overhead_ms,
+                            live_info_cb=_ph_arb_live_cb,
+                        )
+                        if _ph_eg_arb_vote is not None:
+                            _ph_eg_arb_final = _ph_eg_arb_vote
+                            _flog(f"[PH-EG-VETO-ARB] {_ph_eg_arb_meta.get('engine')} "
+                                  f"picked {_ph_eg_arb_vote}")
+                        else:
+                            _flog(f"[PH-EG-VETO-ARB] abstain "
+                                  f"({_ph_eg_arb_meta.get('reason')}) "
+                                  f"— DL_3 veto accepted as-is")
+                    except Exception as _ea:
+                        _flog(f"[PH-EG-VETO-ARB] failed ({_ea!r}) "
+                              f"— DL_3 veto accepted as-is")
+                if _ph_eg_arb_final != _bm:
+                    _flog(f"[PH-EG-VETO] override: nnue={_bm} → "
+                          f"dl3={_ph_eg_arb_final} "
+                          f"(wr_dl={_ph_veto_meta.get('win_rate_dl'):.3f} "
+                          f"wr_nnue={_ph_veto_meta.get('win_rate_nnue'):.3f})")
+                    _bm = _ph_eg_arb_final
+                    _pd = None
+                    _ph_eg_veto_applied = True
+                else:
+                    _flog(f"[PH-EG-VETO] DL_3 veto overruled by ARB: "
+                          f"keeping nnue={_bm}")
+
         return _bm, _pd, _ponderhit_pv[0], {
             "endgame": True,
             "dl_cache_src": dl1_src,
             "council_winner": _bm,
-            "nnue_bestmove": _bm,
+            "nnue_bestmove": (_ni.get("bestmove") if _ni else _bm),
             "nnue_score_cp": (_ni.get("score_cp") if _ni else None),
+            "endgame_veto_applied": _ph_eg_veto_applied,
+            "endgame_veto_dl_move": _ph_eg_veto_dl_move,
+            "endgame_veto_src": (_ph_veto_meta.get("src") if _ph_eg_veto_applied else None),
         }
 
     _dlog("[PH-CACHE-HIT] council mode -- cached DL + nnue ponderhit relay")
@@ -20118,7 +20631,7 @@ def _ponderhit_handle_cache_hit(ctx, position_cmd, move_count, ponderhit_pv_hold
         return _nnue_bm_r or "", _nnue_pd_r, _ponderhit_pv_r[0], {}
 
     _apply_slow_mover(ctx.nnue_1, _nnue_1_opts,
-                      _nnue_slowmover_user_set, "nnue_1-ph-cache-council", eff_s=eff_s, cfg=ctx.cfg)
+                      ctx.cfg.nnue_slowmover_user_set, "nnue_1-ph-cache-council", eff_s=eff_s, cfg=ctx.cfg)
 
     _ponderhit_pv = [None]
     _ni = None
@@ -20142,7 +20655,7 @@ def _ponderhit_handle_cache_hit(ctx, position_cmd, move_count, ponderhit_pv_hold
 
         if _ponderhit_ponder_line and _chi_go_clock:
             _chi_relay_timeout = _ponderhit_calc_relay_timeout(
-                _ponderhit_ponder_line, move_count, _chi_go_clock,
+                _ponderhit_ponder_line, move_count, _chi_go_clock, cfg=ctx.cfg,
             )
         else:
             _chi_relay_timeout = max(10.0, eff_s * 2.0)
@@ -20156,6 +20669,20 @@ def _ponderhit_handle_cache_hit(ctx, position_cmd, move_count, ponderhit_pv_hold
             kill_on_empty=False)
         _phit_trace("chi_relay_end",
                   bm=(_ni.get("bestmove", "") if _ni else "") or "-")
+
+        if _ni and _ni.get("bestmove", "") and not ctx.nnue_1.bm_is_current():
+            _chi_gen_bm = _ni.get("bestmove", "")
+            _flog("[PH-CACHE-HIT/SP-GEN] relay bestmove %r is stale generation "
+                  "(bm_seen=%d go_sent=%d) — rejecting"
+                  % (_chi_gen_bm, ctx.nnue_1._bm_seen, ctx.nnue_1._go_sent))
+            _phit_trace("gen_reject", bm=_chi_gen_bm)
+            _ni["bestmove"] = ""
+            _ponderhit_pv[0] = None
+            _spd = ctx.game_progress.sp_move_diag
+            if _spd is None:
+                _spd = {}
+                ctx.game_progress.sp_move_diag = _spd
+            _spd["sp_gen_rejected"] = _spd.get("sp_gen_rejected", 0) + 1
 
         if _ni and _ni.get("bestmove", ""):
             _chi_relay_bm = _ni.get("bestmove", "")
@@ -20209,22 +20736,16 @@ def _ponderhit_handle_cache_hit(ctx, position_cmd, move_count, ponderhit_pv_hold
                     return "", None, None, {}
                 _pm, _ni = _restart_result
             else:
-                _sync_ok = ctx.nnue_1.flush_until_ready(
-                    timeout=min(2.0, max(0.3, eff_s * 0.2)), max_stale_lines=50)
-                if not _sync_ok:
-                    _flog("[PH-CACHE-HIT] flush_until_ready failed before "
-                          "re-search — re-search skipped (dirty pipe; "
-                          "phantom-go 防止) → finalize 救済カスケードへ")
-                    _phit_trace("chi_flush_fail")
+                if not _flush_or_mark_dirty(ctx, "PH-CACHE-HIT", eff_s):
                     return "", None, None, {}
                 _apply_slow_mover(ctx.nnue_1, _nnue_1_opts,
-                                  _nnue_slowmover_user_set, "nnue_1-ph-cache-council-recovery",
+                                  ctx.cfg.nnue_slowmover_user_set, "nnue_1-ph-cache-council-recovery",
                                   eff_s=eff_s, cfg=ctx.cfg)
                 ctx.nnue_1.send(position_cmd)
                 _chi_rs_movetime_ms = max(500, int(eff_s * 200))
                 _chi_rs_line = "go movetime %d" % _chi_rs_movetime_ms
                 ctx.nnue_1.send(_chi_rs_line)
-                _chi_rs_timeout = _chi_rs_movetime_ms / 1000.0 + max(0.5, min(3.0, eff_s * 0.5))
+                _chi_rs_timeout = _chi_rs_movetime_ms / 1000.0 + _clamp(eff_s * 0.5, 0.5, 3.0)
                 _ponderhit_pv = [None]
                 _pm, _ni = relay_until_bestmove(
                     ctx.nnue_1, timeout=_chi_rs_timeout,
@@ -20248,14 +20769,14 @@ def _ponderhit_handle_cache_hit(ctx, position_cmd, move_count, ponderhit_pv_hold
     _nnue_bm = (_ni.get("bestmove") if _ni else None) or None
     _nnue_pd = _ni.get("ponder") if _ni else None
     _nnue_score = _ni.get("score_cp") if _ni else None
-    ctx.gps.ponder_move_nnue = _nnue_bm or None
+    ctx.game_progress.ponder_move_nnue = _nnue_bm or None
 
     _ponderhit_policy = []
     _ponderhit_mate = False
     _ponderhit_dl_score_hist = {}
     _ponderhit_dl_depth_best = {}
     if dl1_cache is not None:
-        _ponderhit_policy, _ponderhit_mate, _ponderhit_cache_gap, _ponderhit_dl_depth_best, _ponderhit_dl_score_hist = dl1_cache
+        _ponderhit_policy, _ponderhit_mate, _, _ponderhit_dl_depth_best, _ponderhit_dl_score_hist = dl1_cache
 
     _ponderhit_dl_top = _ponderhit_policy[0][0] if _ponderhit_policy else None
     _ponderhit_dl_score = _ponderhit_policy[0][1] if _ponderhit_policy else None
@@ -20273,7 +20794,7 @@ def _ponderhit_handle_cache_hit(ctx, position_cmd, move_count, ponderhit_pv_hold
 
     _ponderhit_stab_threshold = _calc_dl_model_aware_stability_threshold(
         eff_s, model_mb=_dl1_mb_for_stab,
-        nodes=_params.get("POLICY_NODES", 2000), game_phase=_game_phase_value,
+        nodes=_params["POLICY_NODES"], game_phase=_game_phase_value,
         cfg=ctx.cfg)
     if _ponderhit_dl_top and _ponderhit_dl_score_hist and _ponderhit_stab_threshold > 0:
         _ponderhit_spread = _score_stability(_ponderhit_dl_score_hist, _ponderhit_dl_top)
@@ -20314,7 +20835,7 @@ def _ponderhit_handle_cache_hit(ctx, position_cmd, move_count, ponderhit_pv_hold
                 position_cmd, (_ponderhit_dl_top, _ponderhit_dl2_top, _nnue_bm),
                 _game_phase_value, cfg=ctx.cfg)
             _dlog(f"[GP-POL/PH] dir={_ponderhit_game_phase_policy_dir:+d} "
-                  f"(style={_ponderhit_opponent_id_style} forced={ctx.gps.opponent_id_forced_style} "
+                  f"(style={_ponderhit_opponent_id_style} forced={ctx.game_progress.opponent_id_forced_style} "
                   f"tournament={_tournament_mode} cp={_nnue_score}"
                   + (f" URGENT ε={_ponderhit_game_phase_policy_w:.3f}" if _ponderhit_game_phase_policy_urgent else "")
                   + ")")
@@ -20406,9 +20927,9 @@ def _ponderhit_handle_cache_hit(ctx, position_cmd, move_count, ponderhit_pv_hold
         "game_phase_policy_dir":   _ponderhit_game_phase_policy_dir,
         "game_phase_policy_fired": _ponderhit_game_phase_policy_h.value,
         "game_phase_policy_urgent": _ponderhit_game_phase_policy_urgent,
-        "opponent_id_sample":    ctx.gps.opponent_id_last_sample,
+        "opponent_id_sample":    ctx.game_progress.opponent_id_last_sample,
         "opponent_id_style":     _ponderhit_opponent_id_style,
-        "opponent_id_samples":   ctx.gps.opponent_id_samples,
+        "opponent_id_samples":   ctx.game_progress.opponent_id_samples,
         "dl_top_move": _ponderhit_policy[0][0] if _ponderhit_policy else None,
         "dl_top_score": _ponderhit_dl_score,
         "nnue_bestmove": _nnue_bm,
@@ -20423,14 +20944,14 @@ def _ponderhit_handle_cache_hit(ctx, position_cmd, move_count, ponderhit_pv_hold
         "_metrics_dl2_top": _ponderhit_dl2_top,
         "_metrics_score_gap": _ph_score_gap,
     }
-    ctx.gps.opponent_id_last_sample = None
+    ctx.game_progress.opponent_id_last_sample = None
 
     try:
         if _ponderhit_final and _ponderhit_final not in ("resign", "win"):
             _emit_score = _ponderhit_pick_emit_score(
                 _ponderhit_final, _nnue_bm, _nnue_score, _ponderhit_dl_top, _ponderhit_dl_score)
             if _emit_score is not None:
-                ctx.gps.ponderhit_emit_ni = {
+                ctx.game_progress.ponderhit_emit_ni = {
                     "score_cp": int(_emit_score),
                     "depth":    (_ni.get("depth", 0) or 0) if _ni else 0,
                     "seldepth": (_ni.get("seldepth", 0) or 0) if _ni else 0,
@@ -20461,8 +20982,7 @@ def _ponderhit_handle_cache_miss(ctx, position_cmd, move_count, ponderhit_pv_hol
             return "", None, None
 
         pm, ni = _restart_result
-        bestmove = ni.get("bestmove", "") if ni else ""
-        ponder = ni.get("ponder") if ni else None
+        bestmove, ponder = _unpack_bestmove(ni)
         return bestmove, ponder, ponderhit_pv_holder[0]
 
     _dlog("[PH-MISS] normal relay path")
@@ -20482,8 +21002,7 @@ def _ponderhit_handle_cache_miss(ctx, position_cmd, move_count, ponderhit_pv_hol
             partial_pv_holder=ponderhit_pv_holder,
             go_clock=go_clock,
         )
-        bestmove = ni.get("bestmove", "") if ni else ""
-        ponder = ni.get("ponder") if ni else None
+        bestmove, ponder = _unpack_bestmove(ni)
         _phit_trace("cm_bypass_relay_end", bm=bestmove or "-")
         if bestmove:
             _bp_board = _get_tracking_board(ctx)
@@ -20505,7 +21024,7 @@ def _ponderhit_handle_cache_miss(ctx, position_cmd, move_count, ponderhit_pv_hol
         _phit_trace("sp_early", bm=_sp_bm or "-")
         if ponderhit_pv_holder is not None and _sp_ni.get("bestmove"):
             ponderhit_pv_holder[0] = _sp_ni.get("bestmove")
-        ctx.gps.ponder_move_nnue = _sp_bm or None
+        ctx.game_progress.ponder_move_nnue = _sp_bm or None
         _ponderhit_capture_emit_ni(ctx, _sp_ni, _sp_bm)
         return _sp_bm, _sp_pd, ponderhit_pv_holder[0] if ponderhit_pv_holder else None
 
@@ -20517,17 +21036,17 @@ def _ponderhit_handle_cache_miss(ctx, position_cmd, move_count, ponderhit_pv_hol
     ponder_line = ctx.ps.ponder_line or ctx.ps.go_line
     if ponder_line and go_clock:
         relay_timeout = _ponderhit_calc_relay_timeout(
-            ponder_line, move_count, go_clock,
+            ponder_line, move_count, go_clock, cfg=ctx.cfg,
         )
     else:
         relay_timeout = max(1.0, eff_s * 1.5) if eff_s else 10.0
     _phit_trace("cm_relay_start", to="%.1f" % relay_timeout)
 
     _game_phase_value = _calc_game_phase(position_cmd, cfg=ctx.cfg,
-                                         child_agreement=ctx.gps.last_child_agreement)
+                                         child_agreement=ctx.game_progress.last_child_agreement)
     _ph_miss_live_cb = _make_live_think_cb(ctx, "ponderhit", position_cmd,
                                           game_phase=_game_phase_value,
-                                          game_phase_delta=_calc_game_phase_delta(_game_phase_value, ctx.gps.last_game_phase))
+                                          game_phase_delta=_calc_game_phase_delta(_game_phase_value, ctx.game_progress.last_game_phase))
     pm, ni = relay_until_bestmove(
         ctx.nnue_1, timeout=relay_timeout,
         intercept_bestmove=True,
@@ -20536,9 +21055,23 @@ def _ponderhit_handle_cache_miss(ctx, position_cmd, move_count, ponderhit_pv_hol
         kill_on_empty=False,
         live_info_cb=_ph_miss_live_cb,
     )
-    bestmove = ni.get("bestmove", "") if ni else ""
-    ponder = ni.get("ponder") if ni else None
+    bestmove, ponder = _unpack_bestmove(ni)
     _phit_trace("cm_relay_end", bm=bestmove or "-")
+
+    if bestmove and not ctx.nnue_1.bm_is_current():
+        _flog("[PH-MISS/SP-GEN] relay bestmove %r is stale generation "
+              "(bm_seen=%d go_sent=%d) — rejecting"
+              % (bestmove, ctx.nnue_1._bm_seen, ctx.nnue_1._go_sent))
+        _phit_trace("gen_reject", bm=bestmove)
+        bestmove = ""
+        ponder = None
+        if ponderhit_pv_holder:
+            ponderhit_pv_holder[0] = None
+        _spd = ctx.game_progress.sp_move_diag
+        if _spd is None:
+            _spd = {}
+            ctx.game_progress.sp_move_diag = _spd
+        _spd["sp_gen_rejected"] = _spd.get("sp_gen_rejected", 0) + 1
 
     if bestmove:
         _ph_relay_board = _get_tracking_board(ctx)
@@ -20563,24 +21096,18 @@ def _ponderhit_handle_cache_miss(ctx, position_cmd, move_count, ponderhit_pv_hol
         relay_until_bestmove(ctx.nnue_1, timeout=_stop_drain_timeout_safe(ctx, locals().get('eff_s')), intercept_bestmove=True,
                              kill_on_empty=False)
         _phit_trace("cm_drain")
-        _sync_ok = ctx.nnue_1.flush_until_ready(
-            timeout=min(2.0, max(0.3, eff_s * 0.2)), max_stale_lines=50)
-        if not _sync_ok:
-            _flog("[PH-MISS] flush_until_ready failed before re-search — "
-                  "re-search skipped (dirty pipe; phantom-go 防止) → "
-                  "finalize 救済カスケードへ")
-            _phit_trace("cm_flush_fail")
+        if not _flush_or_mark_dirty(ctx, "PH-MISS", eff_s):
             return "", None, None
         _rs_movetime_ms = max(500, int(eff_s * 200))
         _rs_line = "go movetime %d" % _rs_movetime_ms
         _apply_slow_mover(
             ctx.nnue_1, _nnue_1_opts,
-            _nnue_slowmover_user_set, "nnue_1-ph-empty-recovery",
+            ctx.cfg.nnue_slowmover_user_set, "nnue_1-ph-empty-recovery",
             eff_s=eff_s, cfg=ctx.cfg,
         )
         ctx.nnue_1.send(position_cmd)
         ctx.nnue_1.send(_rs_line)
-        _rs_timeout = _rs_movetime_ms / 1000.0 + max(0.5, min(3.0, eff_s * 0.5))
+        _rs_timeout = _rs_movetime_ms / 1000.0 + _clamp(eff_s * 0.5, 0.5, 3.0)
         pm, ni = relay_until_bestmove(
             ctx.nnue_1, timeout=_rs_timeout,
             partial_pv_holder=ponderhit_pv_holder,
@@ -20588,8 +21115,7 @@ def _ponderhit_handle_cache_miss(ctx, position_cmd, move_count, ponderhit_pv_hol
             intercept_bestmove=True,
             kill_on_empty=False,
         )
-        bestmove = ni.get("bestmove", "") if ni else ""
-        ponder = ni.get("ponder") if ni else None
+        bestmove, ponder = _unpack_bestmove(ni)
         _phit_trace("cm_research", bm=bestmove or "-")
         if bestmove:
             _rs_board = _get_tracking_board(ctx)
@@ -20604,7 +21130,7 @@ def _ponderhit_handle_cache_miss(ctx, position_cmd, move_count, ponderhit_pv_hol
                 if ponderhit_pv_holder:
                     ponderhit_pv_holder[0] = None
 
-    ctx.gps.ponder_move_nnue = bestmove or None
+    ctx.game_progress.ponder_move_nnue = bestmove or None
 
     _ponderhit_capture_emit_ni(ctx, ni, bestmove)
 
@@ -20615,14 +21141,14 @@ def _ponderhit_handle_cache_miss(ctx, position_cmd, move_count, ponderhit_pv_hol
         _cm_remaining = _clock_rem_ms if _clock_rem_ms is not None else (eff_s * 1000)
         _cm_budget_ms = _cm_remaining - _cm_overhead_ms - 500
         if (bestmove and _cm_budget_ms > 300
-                and ctx.dl_1 is not None and ctx.dl_1._alive
+                and _eng_alive(ctx.dl_1)
                 and ctx.prefetch is not None):
             ctx.prefetch.cancel()
             _cm_lock_timeout = min(0.3, _cm_budget_ms / 1000 * 0.3)
             if ctx.prefetch.dl_1_lock.acquire(timeout=_cm_lock_timeout):
                 try:
                     ctx.dl_1.flush_until_ready(timeout=1.0)
-                    _cm_dl_mt = min(500, max(100, int(_cm_budget_ms * 0.4)))
+                    _cm_dl_mt = _clamp(int(_cm_budget_ms * 0.4), 100, 500)
                     _cm_ms, _, _, _, _ = _run_dl_1_search(
                         ctx.dl_1, position_cmd, 2, 100,
                         timeout=_cm_dl_mt / 1000.0 + 1.0,
@@ -20640,16 +21166,16 @@ def _ponderhit_handle_cache_miss(ctx, position_cmd, move_count, ponderhit_pv_hol
                 _dlog("[CM-DL-RESTORE] dl_1_lock timeout — skipped")
         else:
             _dlog(f"[CM-DL-RESTORE] skipped (budget={_cm_budget_ms:.0f}ms "
-                  f"dl_alive={ctx.dl_1 is not None and ctx.dl_1._alive if ctx.dl_1 else False})")
+                  f"dl_alive={_eng_alive(ctx.dl_1) if ctx.dl_1 else False})")
     except Exception as _cm_e:
         _flog(f"[ignored] CM-DL-RESTORE: {_cm_e!r}")
 
     _cm_nnue_cp = ni.get("score_cp") if ni else None
     if _cm_dl_top_score is not None:
-        ctx.gps.last_council_scores = (
-            max(-3000, min(3000, int(_cm_dl_top_score))),
-            max(-3000, min(3000, int(_cm_nnue_cp))) if _cm_nnue_cp is not None else None)
-        ctx.gps.ponder_move_dl = _cm_dl_top_move
+        ctx.game_progress.last_council_scores = (
+            _clamp(int(_cm_dl_top_score), -_SCORE_CLAMP_CP, _SCORE_CLAMP_CP),
+            _clamp(int(_cm_nnue_cp), -_SCORE_CLAMP_CP, _SCORE_CLAMP_CP) if _cm_nnue_cp is not None else None)
+        ctx.game_progress.ponder_move_dl = _cm_dl_top_move
 
     _cm_overridden = False
     if (_cm_dl_top_move is not None
@@ -20668,7 +21194,6 @@ def _ponderhit_handle_cache_miss(ctx, position_cmd, move_count, ponderhit_pv_hol
                 bestmove = _cm_dl_top_move
                 ponder = None
                 _cm_overridden = True
-                ctx.gps.ponder_move_nnue = bestmove
         except Exception as _cm_ov_e:
             _flog(f"[ignored] CM-DL-OVERRIDE: {_cm_ov_e!r}")
     if not _cm_overridden and _cm_dl_top_move is not None and _cm_dl_top_move != bestmove:
@@ -20698,7 +21223,7 @@ def _ponderhit_capture_emit_ni(ctx, ni, bestmove):
             return
         if not ni:
             return
-        ctx.gps.ponderhit_emit_ni = {
+        ctx.game_progress.ponderhit_emit_ni = {
             "score_cp": ni.get("score_cp", 0) or 0,
             "depth":    ni.get("depth", 0) or 0,
             "seldepth": ni.get("seldepth", 0) or 0,
@@ -20716,23 +21241,12 @@ def _ponderhit_finalize(ctx, bestmove, ponder_move, position_cmd, move_count,
         ctx.ps.dl_ponder_pos = None
 
 
-    if bestmove and bestmove not in ("resign", "win"):
-        _phf_board = _get_tracking_board(ctx)
-        if _phf_board is not None and not _bestmove_is_for_board(bestmove, _phf_board):
-            _flog("[PH-FINAL/SP-echo] relay bestmove %r is not a move for the "
-                  "current board — discarding stale nnue_1 residue, falling to "
-                  "PV-head/emergency recovery" % bestmove)
-            bestmove = ""
+    if _sp_echo_reject(ctx, bestmove, "PH-FINAL"):
+        bestmove = ""
 
     if not bestmove:
-        if ponderhit_pv_val:
-            _pvh_board = _get_tracking_board(ctx)
-            if (_pvh_board is not None
-                    and not _bestmove_is_for_board(ponderhit_pv_val, _pvh_board)):
-                _flog("[PH-FINAL/SP-echo] PV head %r is not a move for the "
-                      "current board — discarding, falling to emergency cascade"
-                      % ponderhit_pv_val)
-                ponderhit_pv_val = None
+        if _sp_echo_reject(ctx, ponderhit_pv_val, "PH-FINAL"):
+            ponderhit_pv_val = None
         if ponderhit_pv_val:
             bestmove = ponderhit_pv_val
             _dlog("[PH-FINAL] WARNING: empty bestmove — using PV head %s"
@@ -20743,7 +21257,7 @@ def _ponderhit_finalize(ctx, bestmove, ponder_move, position_cmd, move_count,
             if _pc:
                 _rem_s = (_pc.remaining_ms or 0) / 1000.0 - _move_overhead_s
                 _ef = max(0.0, _pc.eff_s or 0.0)
-                _emerg_eff_s = max(_ef, min(_rem_s, max(_ef * 3.0, 15.0)))
+                _emerg_eff_s = _clamp(max(_ef * 3.0, 15.0), _ef, _rem_s)
             if position_cmd:
                 _set_current_position(ctx, position_cmd)
             _emerg = None
@@ -20775,7 +21289,7 @@ def _ponderhit_finalize(ctx, bestmove, ponder_move, position_cmd, move_count,
 
     _ponderhit_emit_ni = None
     if bestmove not in ("resign", "win", ""):
-        _captured = getattr(ctx.gps, "ponderhit_emit_ni", None)
+        _captured = getattr(ctx.game_progress, "ponderhit_emit_ni", None)
         if _captured and _captured.get("bestmove") == bestmove:
             _ponderhit_emit_ni = {
                 "score_cp": _captured.get("score_cp", 0) or 0,
@@ -20787,7 +21301,7 @@ def _ponderhit_finalize(ctx, bestmove, ponder_move, position_cmd, move_count,
         elif ponderhit_pv_val:
             _ponderhit_emit_ni = {"score_cp": 0, "depth": 0,
                            "pv": str(ponderhit_pv_val), "bestmove": bestmove}
-    ctx.gps.ponderhit_emit_ni = None
+    ctx.game_progress.ponderhit_emit_ni = None
     if _ponderhit_emit_ni is not None:
         try:
             _es = extra_stats or {}
@@ -20799,8 +21313,7 @@ def _ponderhit_finalize(ctx, bestmove, ponder_move, position_cmd, move_count,
             _ph_score_gap = _es.get("_metrics_score_gap")
             _ph_conf_spread = (_score_stability(_ponderhit_dl_score_hist, _ponderhit_dl_top)
                                if (_ponderhit_dl_score_hist and _ponderhit_dl_top) else None)
-            _ph_conf_ta = (_tdg.time_aggression_rescue_dyn / _time_aggression_base
-                           if _time_aggression_base > 1e-6 else None)
+            _ph_conf_ta = (_ta_rescue_ratio())
             _ph_dl_gap = None
             if _ponderhit_policy and len(_ponderhit_policy) >= 2:
                 _ph_dl_gap = _ponderhit_policy[0][1] - _ponderhit_policy[1][1]
@@ -20818,24 +21331,25 @@ def _ponderhit_finalize(ctx, bestmove, ponder_move, position_cmd, move_count,
                       if ctx.current_position else None)
             _ponderhit_emit_ni["momentum"] = _compute_momentum(
                 score_cp=_ponderhit_emit_ni.get("score_cp"),
-                prev_score_cp=ctx.gps.last_nnue_score_cp,
+                prev_score_cp=ctx.game_progress.last_nnue_score_cp,
                 game_phase=_ph_gp,
-                prev_game_phase=ctx.gps.last_game_phase,
-                council_agree_streak=ctx.gps.council_agree_streak,
-                tesuki_n=ctx.gps.last_tesuki_n)
-            ctx.gps.last_momentum = _ponderhit_emit_ni["momentum"]
-            ctx.gps.last_sharpness = _ponderhit_emit_ni["sharpness"]
+                prev_game_phase=ctx.game_progress.last_game_phase,
+                council_agree_streak=ctx.game_progress.council_agree_streak,
+                tesuki_n=ctx.game_progress.last_tesuki_n)
+            ctx.game_progress.last_momentum = _ponderhit_emit_ni["momentum"]
+            ctx.game_progress.last_sharpness = _ponderhit_emit_ni["sharpness"]
             _regime_agree = bool(bestmove and _ponderhit_dl_top
                                 and _nnue_bm
                                 and bestmove == _ponderhit_dl_top == _nnue_bm
                                 and (_ponderhit_dl2_top is None
                                      or _ponderhit_dl2_top == bestmove))
             _regime_collapse = _regime_update_ema(
-                ctx.gps, _ponderhit_emit_ni.get("confidence"),
+                ctx.game_progress, _ponderhit_emit_ni.get("confidence"),
                 _ponderhit_emit_ni.get("sharpness"), _regime_agree)
-            _ponderhit_emit_ni["regime_conviction"] = ctx.gps.regime_conviction
-            _ponderhit_emit_ni["regime_label"]     = ctx.gps.regime_label
+            _ponderhit_emit_ni["regime_conviction"] = ctx.game_progress.regime_conviction
+            _ponderhit_emit_ni["regime_label"]     = ctx.game_progress.regime_label
             _ponderhit_emit_ni["regime_collapse"]   = _regime_collapse
+            _ponderhit_emit_ni["regime_force_crisis"] = ctx.game_progress.regime_force_crisis
         except Exception as _ph_met_e:
             _flog(f"[METRICS-PH] compute failed: {_ph_met_e!r}")
     if ponder_move:
@@ -20847,7 +21361,7 @@ def _ponderhit_finalize(ctx, bestmove, ponder_move, position_cmd, move_count,
     if bestmove not in ("resign", "win", ""):
         next_pos = _position_after_move(position_cmd, bestmove)
         _start_prefetch_after_bestmove(ctx, next_pos, ponder_move, move_count)
-        ctx.gps.ponder_arb_pred = _ponder_arb_predict_core(
+        ctx.game_progress.ponder_arb_pred = _ponder_arb_predict_core(
             ponderhit_pv_val, bestmove, ponder_move)
 
     go_clock = ctx.ps.ponder_clock
@@ -20856,7 +21370,7 @@ def _ponderhit_finalize(ctx, bestmove, ponder_move, position_cmd, move_count,
 
     (_ponderhit_fin_gp_WHAND, _ponderhit_fin_gp_P, _ponderhit_fin_gp_INV, _ponderhit_fin_gp_KING,
      _ponderhit_fin_gp_EXPOSURE, _ponderhit_fin_gp_PLY) = _calc_game_phase_features(position_cmd)
-    _child_agreement = ctx.gps.last_child_agreement
+    _child_agreement = ctx.game_progress.last_child_agreement
     _ponderhit_fin_game_phase = _calc_game_phase(position_cmd, ctx.cfg,
                                                   child_agreement=_child_agreement)
 
@@ -20887,28 +21401,29 @@ def _ponderhit_finalize(ctx, bestmove, ponder_move, position_cmd, move_count,
         "regime_conviction": (_ponderhit_emit_ni.get("regime_conviction") if _ponderhit_emit_ni else None),
         "regime_label": (_ponderhit_emit_ni.get("regime_label") if _ponderhit_emit_ni else None),
         "regime_collapse": (_ponderhit_emit_ni.get("regime_collapse") if _ponderhit_emit_ni else None),
+        "regime_force_crisis": (_ponderhit_emit_ni.get("regime_force_crisis") if _ponderhit_emit_ni else None),
         "_diag": diag,
         "game_phase":       _ponderhit_fin_game_phase,
         **_gp_record_fields(_ponderhit_fin_game_phase,
                             (_ponderhit_fin_gp_WHAND, _ponderhit_fin_gp_P, _ponderhit_fin_gp_INV,
                              _ponderhit_fin_gp_KING, _ponderhit_fin_gp_EXPOSURE, _ponderhit_fin_gp_PLY),
-                            ctx.gps.last_game_phase),
-        "ponder_elapsed_s":      ctx.gps.ponder_elapsed_s,
-        "ponder_hit":            ctx.gps.ponder_hit,
-        "ponder_sp":             ctx.gps.ponder_sp,
-        "ponder_miss_reason":    ctx.gps.ponder_miss_reason,
-        "ponder_conf_level":     ctx.gps.ponder_conf_level,
-        "ponder_conf_action":    ctx.gps.ponder_conf_action,
-        "ponder_move_dl":        ctx.gps.ponder_move_dl,
-        "ponder_move_nnue":      ctx.gps.ponder_move_nnue,
+                            ctx.game_progress.last_game_phase),
+        "ponder_elapsed_s":      ctx.game_progress.ponder_elapsed_s,
+        "ponder_hit":            ctx.game_progress.ponder_hit,
+        "ponder_sp":             ctx.game_progress.ponder_sp,
+        "ponder_miss_reason":    ctx.game_progress.ponder_miss_reason,
+        "ponder_conf_level":     ctx.game_progress.ponder_conf_level,
+        "ponder_conf_action":    ctx.game_progress.ponder_conf_action,
+        "ponder_move_dl":        ctx.game_progress.ponder_move_dl,
+        "ponder_move_nnue":      ctx.game_progress.ponder_move_nnue,
         "ponder_move_agreement": (
-            (ctx.gps.ponder_move_dl == ctx.gps.ponder_move_nnue)
-            if (ctx.gps.ponder_move_dl is not None and ctx.gps.ponder_move_nnue is not None)
+            (ctx.game_progress.ponder_move_dl == ctx.game_progress.ponder_move_nnue)
+            if (ctx.game_progress.ponder_move_dl is not None and ctx.game_progress.ponder_move_nnue is not None)
             else None
         ),
-        "ponder_prefetch_corr":  ctx.gps.ponder_prefetch_corr,
+        "ponder_prefetch_corr":  ctx.game_progress.ponder_prefetch_corr,
     }
-    ctx.gps.ponder_move_agreement = stats_record["ponder_move_agreement"]
+    ctx.game_progress.ponder_move_agreement = stats_record["ponder_move_agreement"]
     _ph_live_dl1_policy = None
     if extra_stats:
         _ph_live_dl1_policy = extra_stats.pop("_live_dl1_policy", None)
@@ -20923,48 +21438,53 @@ def _ponderhit_finalize(ctx, bestmove, ponder_move, position_cmd, move_count,
                          if go_clock else None)
         _ph_policy_think = _ph_live_dl1_policy
         if ctx.endgame_mode:
-            _ph_policy_think = ctx.gps.dl_3_rescue_policy
+            _ph_policy_think = ctx.game_progress.dl_3_rescue_policy
         _LIVE.set_think(_ph_rec, position_cmd, _ph_policy_think,
                         _ph_pv_think, _ph_ck_think,
                         mode="endgame" if ctx.endgame_mode else None)
-    ctx.gps.dl_3_rescue_policy = None
+    ctx.game_progress.dl_3_rescue_policy = None
     _append_move_record(ctx, _build_move_record(stats_record))
 
-    ctx.gps.last_game_phase = _ponderhit_fin_game_phase
-    ctx.gps.opponent_id_last_sample = None
+    ctx.game_progress.last_game_phase = _ponderhit_fin_game_phase
+    ctx.game_progress.opponent_id_last_sample = None
 
     ctx.ps.active = False
     ctx.ps.nnue1_ponder_sent = False
-    _dl_s = stats_record.get("dl_score_used") or stats_record.get("dl_top_score")
-    _nn_s = stats_record.get("nnue_score_cp") or stats_record.get("nnue_score")
+    _dl_s = stats_record.get("dl_score_used")
+    if _dl_s is None:
+        _dl_s = stats_record.get("dl_top_score")
+    _nn_s = stats_record.get("nnue_score_cp")
+    if _nn_s is None:
+        _nn_s = stats_record.get("nnue_score")
     if _dl_s is not None or _nn_s is not None:
-        ctx.gps.last_council_scores = (_dl_s, _nn_s)
+        ctx.game_progress.last_council_scores = (_dl_s, _nn_s)
 
     _ph_nnue_cp = stats_record.get("nnue_score_cp")
     if _ph_nnue_cp is not None:
-        ctx.gps.last_nnue_score_cp = int(_ph_nnue_cp)
-    ctx.gps.last_nnue_mate_ply = None
+        ctx.game_progress.last_nnue_score_cp = int(_ph_nnue_cp)
+    ctx.game_progress.last_nnue_mate_ply = None
     _ph_dl_top = stats_record.get("dl_top_move")
     _ph_nnue_bm = stats_record.get("nnue_bestmove")
     _ph_agree = (_ph_dl_top is not None and _ph_nnue_bm is not None
                  and _ph_dl_top == _ph_nnue_bm)
-    ctx.gps.council_agree_streak = (
-        (ctx.gps.council_agree_streak + 1) if _ph_agree else 0)
+    ctx.game_progress.council_agree_streak = (
+        (ctx.game_progress.council_agree_streak + 1) if _ph_agree else 0)
     _ph_voices = sum(1 for v in (_ph_dl_top, _ph_nnue_bm) if v)
     _ph_agree_n = sum(1 for v in (_ph_dl_top, _ph_nnue_bm) if v and v == bestmove) if _ph_voices else 0
-    ctx.gps.last_child_agreement = (_ph_agree_n / _ph_voices) if _ph_voices > 0 else None
+    ctx.game_progress.last_child_agreement = (_ph_agree_n / _ph_voices) if _ph_voices > 0 else None
 
 
 
 def _handle_ponderhit(ctx, line):
     _phit_trace_start()
-    if ctx.gps.ponder_arb_stop is not None:
+    ctx.game_progress.sp_move_diag = {}
+    if ctx.game_progress.ponder_arb_stop is not None:
         try:
-            ctx.gps.ponder_arb_stop.set()
+            ctx.game_progress.ponder_arb_stop.set()
         except Exception as _ie:
             _flog(f"[ignored] _handle_ponderhit: {_ie!r}")
-    ctx.gps.ponder_arb_pred = None
-    ctx.gps.ponder_arb_pred_dl = None
+    ctx.game_progress.ponder_arb_pred = None
+    ctx.game_progress.ponder_arb_pred_dl = None
     move_count, position_cmd, ponderhit_pv_holder = _ponderhit_preamble(ctx, line)
     _phit_trace("preamble", mc=move_count)
     bestmove = ""
@@ -20987,14 +21507,14 @@ def _handle_ponderhit(ctx, line):
                      move_count, ponderhit_pv_val=pv_val, extra_stats=extra_stats)
         return
 
-    _pending = ctx.gps.opponent_id_pending
+    _pending = ctx.game_progress.opponent_id_pending
     if _pending is not None:
         try:
             _base_tokens_p2, _nnue_pred_p2, _dl_pred_p2 = _pending
             _ph_actual = _opponent_id_extract_actual_core(
                 _base_tokens_p2, (position_cmd or "").split())
             if _nnue_pred_p2 and _ph_actual and _ph_actual == _nnue_pred_p2:
-                ctx.gps.opponent_id_pending = None
+                ctx.game_progress.opponent_id_pending = None
                 _dlog("[OPP-ID] ponderhit 経路: actual==nnue_pred 恒等観測を skip "
                       "(片側ペギング抑止)")
         except Exception as _r2e:
@@ -21011,7 +21531,7 @@ def _handle_ponderhit(ctx, line):
         extra_stats["path"] = "cache_hit"
         extra_stats["prefetch_hit"] = True
         extra_stats["prefetch_j_hit"] = False
-        extra_stats["dl_3_ponder_hit"] = ctx.gps.dl_3_rescue_pending
+        extra_stats["dl_3_ponder_hit"] = ctx.game_progress.dl_3_rescue_pending
         extra_stats.update(cache_stats or {})
         _ponderhit_finalize(ctx, bestmove, ponder_move, position_cmd,
                      move_count, ponderhit_pv_val=pv_val, extra_stats=extra_stats)
@@ -21021,7 +21541,7 @@ def _handle_ponderhit(ctx, line):
         ctx, position_cmd, move_count, ponderhit_pv_holder
     )
     extra_stats["path"] = "cache_miss"
-    extra_stats["dl_3_ponder_hit"] = ctx.gps.dl_3_rescue_pending
+    extra_stats["dl_3_ponder_hit"] = ctx.game_progress.dl_3_rescue_pending
     _ponderhit_finalize(ctx, bestmove, ponder_move, position_cmd,
                  move_count, ponderhit_pv_val=pv_val, extra_stats=extra_stats)
 def _handle_stop(ctx, line):
@@ -21030,9 +21550,9 @@ def _handle_stop(ctx, line):
         ctx.dl_1._live_info_cb = None
     if ctx.dl_2 is not None:
         ctx.dl_2._live_info_cb = None
-    if ctx.gps.ponder_arb_stop is not None:
+    if ctx.game_progress.ponder_arb_stop is not None:
         try:
-            ctx.gps.ponder_arb_stop.set()
+            ctx.game_progress.ponder_arb_stop.set()
         except Exception as _ie:
             _flog(f"[ignored] _handle_stop: {_ie!r}")
 
@@ -21053,10 +21573,10 @@ def _handle_stop(ctx, line):
             _flog("[STOP-IDLE-GUARD] stop during go ponder but nnue_1 was "
                   "never sent go ponder — skip relay (engine preserved)")
         else:
-            _stop_relay_to = max(0.5, min(2.5, 10.0 * _move_overhead_s))
+            _stop_relay_to = _clamp(10.0 * _move_overhead_s, 0.5, 2.5)
             if _stop_rem_ms and _stop_rem_ms > 0:
-                _stop_relay_to = max(0.3, min(_stop_relay_to,
-                                              _stop_rem_ms / 1000.0 * 0.25))
+                _stop_relay_to = _clamp(
+                    _stop_rem_ms / 1000.0 * 0.25, 0.3, _stop_relay_to)
             _stop_ponder, _stop_nnue_info = relay_until_bestmove(
                 ctx.nnue_1, timeout=_stop_relay_to,
                 intercept_bestmove=True,
@@ -21066,7 +21586,7 @@ def _handle_stop(ctx, line):
                 and not ((_stop_nnue_info or {}).get("bestmove"))):
             _stop_flush_to = 2.0
             if _stop_rem_ms and _stop_rem_ms > 0:
-                _stop_flush_to = max(0.3, min(2.0, _stop_rem_ms / 1000.0 * 0.25))
+                _stop_flush_to = _clamp(_stop_rem_ms / 1000.0 * 0.25, 0.3, 2.0)
             _flog("stop-drain: no bestmove (SP idle) — flush_until_ready で同期 "
                   "(kill せず nnue_1 を温存)")
             ctx.nnue_1.flush_until_ready(timeout=_stop_flush_to, max_stale_lines=50)
@@ -21128,7 +21648,7 @@ def _handle_stop(ctx, line):
             if ctx._zyfamate:
                 _zf_res, _zf_mv, _ = _zyfamate_solve(
                     _sfen_for_position(_em_pos),
-                    timeout_s=_em_movetime / 1000.0, nodes=5000000)
+                    timeout_s=_em_movetime / 1000.0, nodes=5000000, path=ctx.cfg.mate_solver_path)
                 _em_mate_res.result = _zf_res
                 _em_mate_res.best_move = _zf_mv
             else:
@@ -21259,20 +21779,23 @@ def _handle_gameover(ctx, line):
                   "gameover skip (usinewgame/position 全送で回復)")
     if _endgame_separate and ctx.nnue_2._alive:
         ctx.nnue_2.send(line)
-    if ctx.dl_3 is not None and ctx.dl_3._alive:
+    if _eng_alive(ctx.dl_3):
         ctx.dl_3.send(line)
-    if ctx.mate_solver is not None and ctx.mate_solver._alive:
+    if _eng_alive(ctx.mate_solver):
         ctx.mate_solver.send(line)
-    if ctx.book is not None and ctx.book._alive:
+    if _eng_alive(ctx.book):
         ctx.book.send(line)
     _LIVE._stop_clock()
     parts = line.split()
     ctx.game_meta["result"] = parts[1] if len(parts) > 1 else "unknown"
-    ctx.game_meta["ponder_arb_dispatched"] = ctx.gps.ponder_arb_dispatched
-    ctx.game_meta["ponder_arb_hits"] = ctx.gps.ponder_arb_hits
+    ctx.game_meta["ponder_arb_dispatched"] = ctx.game_progress.ponder_arb_dispatched
+    ctx.game_meta["ponder_arb_hits"] = ctx.game_progress.ponder_arb_hits
     ctx.game_meta["dlp_mode"] = str(_DLPONDER_STATE.get("mode", "unknown"))
+    ctx.game_meta["dlp_diff"] = _dlp_game_diff()
     _write_game_stats(ctx.game_log, ctx.game_meta, cfg=ctx.cfg)
+    _dlp_snapshot_for_diff()
     ctx.reset_game()
+    _assert_sp_consistency(ctx, "gameover")
     ctx.ps.mate_skip_pending = False
     ctx.ps.active = False
     global _usi_session_active
@@ -21304,7 +21827,7 @@ def _handle_gameover(ctx, line):
 
 
 def _handle_bare_sfen(ctx, line):
-    _out_path = os.path.join(_get_base_dir(), "sfen_links.txt")
+    _out_path = os.path.join(_BASE_DIR, "sfen_links.txt")
     try:
         url = _zenrei_same_url(line.strip())
         with open(_out_path, "a", encoding="utf-8") as _f:
@@ -21313,6 +21836,13 @@ def _handle_bare_sfen(ctx, line):
     except Exception as e:
         _flog(f"[sfen_links] error for {line.strip()!r}: {e}")
 
+
+def _reject_if_session_active(tag: str) -> bool:
+    if _usi_session_active:
+        _flog(f"[{tag}] rejected — USI session already active (usinewgame received)")
+        _console(f"info string [WARN] {tag} を拒否: USI セッションが動作中です。")
+        return True
+    return False
 
 def _handle_quit(ctx, line):
     _flog("quit")
@@ -21329,7 +21859,7 @@ def _handle_spsa(ctx, line):
             _flog("[SPSA] 前提工程 (DLP/Setup) 失敗 — SPSA を開始しない")
             return
         _saved = sys.argv[:]
-        _state_path = os.path.join(_get_base_dir(), "spsa_state.txt")
+        _state_path = os.path.join(_BASE_DIR, "spsa_state.txt")
         _argv = [sys.argv[0], "--spsa", "--run"]
         if os.path.exists(_state_path):
             _argv += ["--resume", _state_path]
@@ -21348,11 +21878,7 @@ def _handle_spsa(ctx, line):
 
 
 def _handle_game(ctx, line):
-    global _game_thread_started
-
-    if _usi_session_active:
-        _flog("[GAME] 'game' command rejected — USI session already active (usinewgame received)")
-        _console("info string [WARN] game command を拒否: USI セッションが動作中です。")
+    if _reject_if_session_active("game"):
         return
 
     if _game_thread_started:
@@ -21384,11 +21910,7 @@ def _handle_game(ctx, line):
 
 
 def _handle_match(ctx, line):
-    global _game_thread_started
-
-    if _usi_session_active:
-        _flog("[MATCH] 'match' command rejected — USI session already active (usinewgame received)")
-        _console("info string [WARN] match command を拒否: USI セッションが動作中です。")
+    if _reject_if_session_active("match"):
         return
 
     if _game_thread_started:
@@ -21440,7 +21962,7 @@ def _handle_grid(ctx, line):
 
 def _console_pipeline_runner(name, fn, args):
     _flog(f"[{name}] stdin 起動 args={args!r}")
-    print(f"info string [setup] {name} を開始しました (ログ: {_get_base_dir()})", flush=True)
+    print(f"info string [setup] {name} を開始しました (ログ: {_BASE_DIR})", flush=True)
     def _run():
         try:
             fn(args)
@@ -21451,17 +21973,13 @@ def _console_pipeline_runner(name, fn, args):
 
 
 def _handle_makebook(ctx, line):
-    if _usi_session_active:
-        _flog("[makebook] rejected — USI session already active (usinewgame received)")
-        _console("info string [WARN] makebook を拒否: USI セッションが動作中です。")
+    if _reject_if_session_active("makebook"):
         return
     _console_pipeline_runner("makebook", _makebook_cli, line.split()[1:])
 
 
 def _handle_dlp(ctx, line):
-    if _usi_session_active:
-        _flog("[dlp] rejected — USI session already active (usinewgame received)")
-        _console("info string [WARN] dlp を拒否: USI セッションが動作中です。")
+    if _reject_if_session_active("dlp"):
         return
     _console_pipeline_runner("dlp", _dlponder_cli, line.split()[1:])
 
@@ -21471,17 +21989,13 @@ def _handle_fit(ctx, line):
 
 
 def _handle_tournament(ctx, line):
-    if _usi_session_active:
-        _flog("[tournament] rejected — USI session already active (usinewgame received)")
-        _console("info string [WARN] tournament を拒否: USI セッションが動作中です。")
+    if _reject_if_session_active("tournament"):
         return
     _console_pipeline_runner("tournament", _tournament_cli, line.split()[1:])
 
 
 def _handle_setup(ctx, line):
-    if _usi_session_active:
-        _flog("[setup] rejected — USI session already active (usinewgame received)")
-        _console("info string [WARN] setup を拒否: USI セッションが動作中です。")
+    if _reject_if_session_active("setup"):
         return
     _flog("[SETUP] 'setup' command received — starting device-dependent tuning")
     print("info string [setup] セットアップ (環境依存キーの調整 → setup_config.txt) を開始しました", flush=True)
@@ -21504,9 +22018,7 @@ def _handle_setup(ctx, line):
 
 
 def _handle_teacher(ctx, line):
-    if _usi_session_active:
-        _flog("[teacher] rejected — USI session already active (usinewgame received)")
-        _console("info string [WARN] teacher を拒否: USI セッションが動作中です。")
+    if _reject_if_session_active("teacher"):
         return
     args = [a.strip('"') for a in re.findall(r'"[^"]*"|\S+', line)][1:]
     psv_path = None
@@ -21581,7 +22093,7 @@ def _handle_replay(ctx, line):
         _dt = ((ts - prev_ts) if (prev_ts is not None
                                   and isinstance(ts, (int, float))) else 1.0)
         if moves:
-            time.sleep(min(5.0, max(0.05, _dt)) / speed)
+            time.sleep(_clamp(_dt, 0.05, 5.0) / speed)
         if isinstance(ts, (int, float)):
             prev_ts = ts
         moves.append(mv)
@@ -21665,6 +22177,7 @@ sv_PIECES = ["FU", "KY", "KE", "GI", "KI", "KA", "HI", "OU",
 sv_N_PIECE = len(sv_PIECES)
 sv_N_CELL_CLASS = 1 + 2 * sv_N_PIECE
 sv_PROMOTE = {"FU": "TO", "KY": "NY", "KE": "NK", "GI": "NG", "KA": "UM", "HI": "RY"}
+sv_UNPROMOTE = {v: k for k, v in sv_PROMOTE.items()}
 sv_HAND_ORDER = ["FU", "KY", "KE", "GI", "KI", "KA", "HI"]
 sv_KANJI = {"FU": "歩", "KY": "香", "KE": "桂", "GI": "銀", "KI": "金", "KA": "角",
          "HI": "飛", "OU": "玉", "TO": "と", "NY": "杏", "NK": "圭", "NG": "全",
@@ -21771,8 +22284,10 @@ class SvBoard:
                 row += str(emp)
             rows.append(row)
         h = ""
+        _USI_HAND = (6, 5, 4, 3, 2, 1, 0)
         for owner in (0, 1):
-            for i, n in enumerate(self.hand[owner]):
+            for i in _USI_HAND:
+                n = self.hand[owner][i]
                 if n:
                     s = sv_PC_SFEN[sv_HAND_ORDER[i]]
                     h += (str(n) if n > 1 else "") + (s if owner == 0 else s.lower())
@@ -21790,7 +22305,7 @@ class SvBoard:
             cap = self.cells[to]
             if cap:
                 cname, _ = self.pname(cap)
-                base = {v: k for k, v in sv_PROMOTE.items()}.get(cname, cname)
+                base = sv_UNPROMOTE.get(cname, cname)
                 if base != "OU":
                     self.hand[self.side][sv_HAND_ORDER.index(base)] += 1
             pid = self.cells[frm]
@@ -21887,7 +22402,7 @@ def sv_parse_csa(text: str):
             moves.append(mv)
             b.apply_usi(mv)
         elif ln.startswith("%"):
-            if ln.startswith("%TORYO") or ln.startswith("%TIME_UP") or ln.startswith("%ILLEGAL"):
+            if ln.startswith(("%TORYO", "%TIME_UP", "%ILLEGAL")):
                 winner = 1 - b.side
             elif ln.startswith("%KACHI"):
                 winner = b.side
@@ -22037,39 +22552,51 @@ _SV_GP_HAND_W = (1, 3, 3, 5, 5, 8, 10)
 
 
 def sv_gp_features(sb):
-    whand = (sum(n * w for n, w in zip(sb.hand[0], _SV_GP_HAND_W))
-             + sum(n * w for n, w in zip(sb.hand[1], _SV_GP_HAND_W)))
+    cells = sb.cells
+    h0, h1 = sb.hand[0], sb.hand[1]
+    whand = (h0[0] + h1[0] + (h0[1] + h1[1]) * 3 + (h0[2] + h1[2]) * 3
+             + (h0[3] + h1[3]) * 5 + (h0[4] + h1[4]) * 5
+             + (h0[5] + h1[5]) * 8 + (h0[6] + h1[6]) * 10)
     promo = camp = 0
-    kings = {}
-    pieces = []
-    _prom = frozenset(sv_PROMOTE.values())
-    for idx, pid in enumerate(sb.cells):
+    k0c = k0r = k1c = k1r = -1
+    pcs = []
+    pcs_a = pcs.append
+    for idx in range(81):
+        pid = cells[idx]
         if pid == 0:
             continue
-        name, owner = SvBoard.pname(pid)
-        r_, c_ = divmod(idx, 9)
-        if name in _prom:
-            promo += 1
-        if name == "OU":
-            kings[owner] = (c_, r_)
+        pm1 = pid - 1
+        pi = pm1 % 14
+        owner = pm1 // 14
+        if pi == 7:
+            r_ = idx // 9; c_ = idx % 9
+            if owner == 0:
+                k0c = c_; k0r = r_
+            else:
+                k1c = c_; k1r = r_
             continue
-        pieces.append((c_, r_, owner))
+        if pi >= 8:
+            promo += 1
+        r_ = idx // 9
         rank = r_ + 1
-        if owner == 0 and rank <= 3:
+        if owner == 0:
+            if rank <= 3:
+                camp += 1
+        elif rank >= 7:
             camp += 1
-        elif owner == 1 and rank >= 7:
-            camp += 1
+        pcs_a((idx % 9, r_, owner))
     king = 0.0
-    kp = kings.get(0)
-    if kp is not None and (kp[1] + 1) <= _GAME_PHASE_KING_SENTE_ROW:
-        king += float(_GAME_PHASE_KING_SENTE_ROW - (kp[1] + 1))
-    kp = kings.get(1)
-    if kp is not None and (kp[1] + 1) >= _GAME_PHASE_KING_GOTE_ROW:
-        king += float((kp[1] + 1) - _GAME_PHASE_KING_GOTE_ROW)
+    if k0r >= 0 and (k0r + 1) <= _GAME_PHASE_KING_SENTE_ROW:
+        king += float(_GAME_PHASE_KING_SENTE_ROW - (k0r + 1))
+    if k1r >= 0 and (k1r + 1) >= _GAME_PHASE_KING_GOTE_ROW:
+        king += float((k1r + 1) - _GAME_PHASE_KING_GOTE_ROW)
     ring1 = 0
-    for owner, (kc, kr) in kings.items():
-        for cc, cr, po in pieces:
-            if po == owner and max(abs(cc - kc), abs(cr - kr)) == 1:
+    for cc, cr, po in pcs:
+        if po == 0 and k0r >= 0:
+            if max(abs(cc - k0c), abs(cr - k0r)) <= 1 and (cc, cr) != (k0c, k0r):
+                ring1 += 1
+        elif po == 1 and k1r >= 0:
+            if max(abs(cc - k1c), abs(cr - k1r)) <= 1 and (cc, cr) != (k1c, k1r):
                 ring1 += 1
     return whand, promo, camp, king, 16 - ring1
 
@@ -22099,13 +22626,13 @@ def _sv_wr_phase_cfg():
         class _Shim:
             pass
         s = _Shim()
-        s.council_wr_scale_nnue       = max(1e-6, float(_cfg.get("Council_WR_Scale_NNUE", 0.004)))
-        s.council_wr_scale_nnue_early = max(1e-6, float(_cfg.get("Council_WR_Scale_NNUE_Early", 0.0036)))
-        s.council_wr_scale_nnue_late  = max(1e-6, float(_cfg.get("Council_WR_Scale_NNUE_Late", 0.0044)))
+        s.council_wr_scale_nnue       = _cfloat(_cfg, "Council_WR_Scale_NNUE", 0.004, lo=1e-6)
+        s.council_wr_scale_nnue_early = _cfloat(_cfg, "Council_WR_Scale_NNUE_Early", 0.0036, lo=1e-6)
+        s.council_wr_scale_nnue_late  = _cfloat(_cfg, "Council_WR_Scale_NNUE_Late", 0.0044, lo=1e-6)
         s.council_wr_offset_nnue      = float(_cfg.get("Council_WR_Offset_NNUE", 0.0))
-        s.council_wr_scale_dl         = max(1e-6, float(_cfg.get("Council_WR_Scale_DL", 0.0044)))
-        s.council_wr_scale_dl_early   = max(1e-6, float(_cfg.get("Council_WR_Scale_DL_Early", 0.0044)))
-        s.council_wr_scale_dl_late    = max(1e-6, float(_cfg.get("Council_WR_Scale_DL_Late", 0.0054)))
+        s.council_wr_scale_dl         = _cfloat(_cfg, "Council_WR_Scale_DL", 0.0044, lo=1e-6)
+        s.council_wr_scale_dl_early   = _cfloat(_cfg, "Council_WR_Scale_DL_Early", 0.0044, lo=1e-6)
+        s.council_wr_scale_dl_late    = _cfloat(_cfg, "Council_WR_Scale_DL_Late", 0.0054, lo=1e-6)
         s.council_wr_offset_dl        = float(_cfg.get("Council_WR_Offset_DL", 0.0))
         s.council_nyugyoku_dl_restore = float(_cfg.get("Council_Nyugyoku_DL_Restore", 1.0))
         _SV_WR_PHASE_CFG = s
@@ -22299,14 +22826,11 @@ def sv_cmd_dataset(a):
 
 
 if _SV_OK:
-    sv_PACK_DT_V1 = np.dtype([("cells", "i1", 81), ("hand", "i1", 14), ("side", "i1"),
-                           ("ply", "<u2"), ("move", "<i2"), ("result", "i1"),
-                           ("total", "<u2")])
     sv_PACK_DT = np.dtype([("cells", "i1", 81), ("hand", "i1", 14), ("side", "i1"),
                         ("ply", "<u2"), ("move", "<i2"), ("result", "i1"),
                         ("total", "<u2"), ("last_to", "i1")])
 else:
-    sv_PACK_DT_V1 = sv_PACK_DT = None
+    sv_PACK_DT = None
 _sv_PACK_SHARD = 2_000_000
 
 
@@ -22701,7 +23225,7 @@ class _SvInfer:
         if vram_mb < 6144:
             _flog("[SvInfer] VRAM %dMB < 6144MB — model WR 無効" % vram_mb)
             return
-        _exe_dir = (os.path.dirname(sys.executable) if getattr(sys, "frozen", False)
+        _exe_dir = (os.path.dirname(sys.executable) if _IS_FROZEN
                     else os.path.dirname(os.path.abspath(__file__)))
         p_slim = os.path.join(_exe_dir, "model.infer.pt")
         p_full = os.path.join(_exe_dir, "model.pt")
@@ -22860,8 +23384,8 @@ class _SvInfer:
             r = {"value": v}
             if out_g is not None:
                 _g = out_g.float()[0]
-                r["gp"] = max(0.0, min(1.5, float(_g[0])))
-                r["nyug"] = max(0.0, min(1.0, float(_g[1])))
+                r["gp"] = _clamp(float(_g[0]), 0.0, 1.5)
+                r["nyug"] = _clamp01(float(_g[1]))
             return r
         except Exception:
             return None
@@ -22896,16 +23420,16 @@ class SvDataset:
                 torch.tensor(int(self.z["policy"][i])),
                 torch.tensor((-1.0, -1.0)), torch.tensor(-1e9))
 
+def _pickle_clear(obj, *keys):
+    st = obj.__dict__.copy()
+    for k in keys:
+        st[k] = None
+    return st
+
 class SvPackDataset:
 
     def __init__(self, root, aug=0.5, value_lambda=0.02):
-        dt = sv_PACK_DT
-        mp = os.path.join(root, "pack_meta.json")
-        if os.path.exists(mp):
-            rb = json.load(open(mp)).get("record_bytes", sv_PACK_DT.itemsize)
-            if rb == sv_PACK_DT_V1.itemsize:
-                dt = sv_PACK_DT_V1
-        self.dt = dt
+        self.dt = sv_PACK_DT
         self.paths = sorted(p for p in glob.glob(os.path.join(root, "shard_*.bin"))
                             if os.path.getsize(p) > 0)
         if not self.paths:
@@ -22913,18 +23437,14 @@ class SvPackDataset:
         self.offsets = [0]
         for fp in self.paths:
             self.offsets.append(self.offsets[-1]
-                                + os.path.getsize(fp) // dt.itemsize)
+                                + os.path.getsize(fp) // self.dt.itemsize)
         self.shards = None
         self.aug, self.vlam = aug, value_lambda
         self._rng = None
         self._tile_cache = None
 
     def __getstate__(self):
-        st = self.__dict__.copy()
-        st["shards"] = None
-        st["_rng"] = None
-        st["_tile_cache"] = None
-        return st
+        return _pickle_clear(self, "shards", "_rng", "_tile_cache")
 
     def __len__(self):
         return self.offsets[-1]
@@ -23120,7 +23640,9 @@ class SvGpuBatchRenderer:
         self.px = px
         self.py = py
         self.x_gote, self.x_sente = x_gote, x_sente
-        self.H = self.W = sv_IMG
+        H = W = sv_IMG
+        self.H = H
+        self.W = W
         self.C = 1 if sv_GRAY else 3
         fonts = _sv_FONTS or []
         use_kanji = bool(fonts)
@@ -23153,6 +23675,19 @@ class SvGpuBatchRenderer:
         self.blur_k = k2d.view(1, 1, ks, ks).expand(
             self.C, 1, ks, ks).contiguous()
         self.blur_pad = ks // 2
+        self.r_h = min(py[9] + 1, H) - py[0]
+        self.r_w = min(px[9] + 1, W) - px[0]
+        self.board_h = 9 * ch_
+        self.board_w = 9 * cw
+        grid = torch.zeros(self.r_h, self.r_w, dtype=torch.bool, device=device)
+        for i in range(10):
+            gy = py[i] - py[0]
+            if 0 <= gy < self.r_h:
+                grid[gy, :] = True
+            gx = px[i] - px[0]
+            if 0 <= gx < self.r_w:
+                grid[:, gx] = True
+        self.grid_mask = grid
 
     def render_batch(self, cells, hand, side, augment=True, strength=0.5):
         import torch
@@ -23162,6 +23697,8 @@ class SvGpuBatchRenderer:
             H, W, C = self.H, self.W, self.C
             px, py, cw, ch_ = self.px, self.py, self.cw, self.ch
             dev = self.device
+            r_h, r_w = self.r_h, self.r_w
+            bh, bw = self.board_h, self.board_w
             if augment:
                 bg = torch.randint(245, 256, (B, 1, 1, 1),
                                    device=dev, dtype=torch.uint8)
@@ -23175,59 +23712,44 @@ class SvGpuBatchRenderer:
                 bd = bg
                 lv = torch.zeros(B, 1, 1, 1, device=dev, dtype=torch.uint8)
             img = bg.expand(B, C, H, W).contiguous()
-            r_h = min(py[9] + 1, H) - py[0]
-            r_w = min(px[9] + 1, W) - px[0]
-            img[:, :, py[0]:py[0] + r_h, px[0]:px[0] + r_w] = \
-                bd.expand(B, C, r_h, r_w)
-            lh = lv.expand(B, C, 1, r_w)
-            lvv = lv.expand(B, C, r_h, 1)
-            for i in range(10):
-                if py[i] < H:
-                    img[:, :, py[i]:py[i] + 1, px[0]:px[0] + r_w] = lh
-                if px[i] < W:
-                    img[:, :, py[0]:py[0] + r_h, px[i]:px[i] + 1] = lvv
+            board = bd.expand(B, C, r_h, r_w).contiguous()
+            gm = self.grid_mask.unsqueeze(0).unsqueeze(0)
+            board = torch.where(gm, lv.expand(B, C, r_h, r_w), board)
+            img[:, :, py[0]:py[0] + r_h, px[0]:px[0] + r_w] = board
+            all_m = self.masks[cells]
+            all_m = all_m.view(B, 9, 9, ch_, cw)
+            all_m = all_m.permute(0, 1, 3, 2, 4).contiguous()
+            all_m = all_m.view(B, 1, bh, bw)
+            y0, x0 = py[0], px[0]
+            sl = img[:, :, y0:y0 + bh, x0:x0 + bw]
+            img[:, :, y0:y0 + bh, x0:x0 + bw] = \
+                torch.where(all_m, lv.expand(B, C, bh, bw), sl)
             lvc = lv.expand(B, C, ch_, cw)
-            for idx in range(81):
-                r, c = divmod(idx, 9)
-                pids = cells[:, idx]
-                m = self.masks[pids].unsqueeze(1)
-                y0, x0 = py[r], px[c]
-                sl = img[:, :, y0:y0 + ch_, x0:x0 + cw]
-                img[:, :, y0:y0 + ch_, x0:x0 + cw] = \
-                    torch.where(m, lvc, sl)
             for owner in range(2):
                 xp = self.x_gote if owner == 1 else self.x_sente
                 for ki in range(7):
-                    oi = 7 * owner + ki
-                    cnt = hand[:, oi]
-                    has = cnt > 0.5
-                    if not has.any():
-                        continue
-                    pid = self.hand_pids[oi]
                     y = ((py[0] + ki * ch_) if owner == 1
                          else (py[9] - (ki + 1) * ch_))
                     if y < 0 or y + ch_ > H or xp < 0 or xp + cw > W:
                         continue
+                    oi = 7 * owner + ki
+                    pid = self.hand_pids[oi]
                     m = (self.masks[pid].unsqueeze(0).unsqueeze(0)
-                         & has.view(B, 1, 1, 1))
+                         & (hand[:, oi] > 0.5).view(B, 1, 1, 1))
                     sl = img[:, :, y:y + ch_, xp:xp + cw]
                     img[:, :, y:y + ch_, xp:xp + cw] = \
                         torch.where(m, lvc, sl)
             x = img.float().div_(255.0)
             if augment:
-                bm = torch.rand(B, device=dev) < 0.4
-                if bm.any():
-                    xb = x[bm]
-                    xb = F.conv2d(
-                        F.pad(xb, [self.blur_pad] * 4, mode='reflect'),
-                        self.blur_k, groups=C)
-                    x[bm] = xb
-                nm = torch.rand(B, device=dev) < 0.5
-                if nm.any():
-                    nl = torch.randint(2, 9, (1,),
-                                       device=dev).item() / 255.0
-                    noise = (torch.rand_like(x[nm]) * 2 - 1) * nl
-                    x[nm] = torch.clamp(x[nm] + noise, 0, 1)
+                bm = (torch.rand(B, device=dev) < 0.4).view(B, 1, 1, 1)
+                x_blur = F.conv2d(
+                    F.pad(x, [self.blur_pad] * 4, mode='reflect'),
+                    self.blur_k, groups=C)
+                x = torch.where(bm, x_blur, x)
+                nm = (torch.rand(B, device=dev) < 0.5).view(B, 1, 1, 1)
+                nl = torch.randint(2, 9, (1,), device=dev).float() / 255.0
+                noise = (torch.rand_like(x) * 2 - 1) * nl
+                x = torch.where(nm, torch.clamp(x + noise, 0, 1), x)
             return x
 
 
@@ -23257,11 +23779,7 @@ class SvPsvDataset:
         return self.offsets[-1]
 
     def __getstate__(self):
-        st = self.__dict__.copy()
-        st["_mmaps"] = None
-        st["_rng"] = None
-        st["_tile_cache"] = None
-        return st
+        return _pickle_clear(self, "_mmaps", "_rng", "_tile_cache")
 
     def __getitem__(self, i):
         import torch
@@ -23284,9 +23802,8 @@ class SvPsvDataset:
                 off = (i - self.offsets[s]) * _PSV_RECORD_SIZE
                 raw = bytes(self._mmaps[s][off:off + _PSV_RECORD_SIZE])
                 data32, score, move16, ply, result, _ = _struct.unpack(_PSV_FMT, raw)
-                sfen = _decode_packed_sfen(data32)
                 sb = SvBoard()
-                sb.set_sfen(sfen)
+                _fast_decode_psfen_into(data32, sb)
                 break
             except Exception as _de:
                 if _retry == 0:
@@ -23312,11 +23829,7 @@ class SvPsvDataset:
         side = torch.tensor(float(sb.side))
         gp, nyug = sv_gp_value2(sb)
         v = sv_cp_to_wr(score, gp if sv_GP_FUSE else None)
-        move_usi = _move16_to_usi(move16)
-        try:
-            pol = sv_usi_to_label(move_usi)
-        except Exception:
-            pol = -1
+        pol = _move16_to_label(move16)
         return (x, cells, hand, side,
                 torch.tensor(v), torch.tensor(pol),
                 torch.tensor((float(gp), float(nyug))),
@@ -23353,21 +23866,25 @@ def _sv_safe_dataloader(dataset, batch_size, shuffle, dlkw):
     _HUGE_DS = 100_000_000
     _sampler = None
     if shuffle and len(dataset) > _HUGE_DS:
-        class _SvHugeRandomSampler(_torch.utils.data.Sampler):
+        class _SvChunkShuffledSampler(_torch.utils.data.Sampler):
+            _CHUNK = 1 << 20
             def __init__(self, n):
                 self.n = n
+                self.n_chunks = (n + self._CHUNK - 1) // self._CHUNK
             def __len__(self):
                 return self.n
             def __iter__(self):
-                left = self.n
-                while left > 0:
-                    k = min(65536, left)
-                    yield from _torch.randint(self.n, (k,)).tolist()
-                    left -= k
-        _sampler = _SvHugeRandomSampler(len(dataset))
+                order = _torch.randperm(self.n_chunks).tolist()
+                for ci in order:
+                    start = ci * self._CHUNK
+                    end = min(start + self._CHUNK, self.n)
+                    yield from range(start, end)
+        _sampler = _SvChunkShuffledSampler(len(dataset))
         shuffle = False
-        _flog("[train] huge dataset (%d) — O(1) random sampler に切替 "
-              "(randperm の巨大確保を回避)" % len(dataset))
+        _flog("[train] huge dataset (%d) — chunk-shuffled sampler に切替 "
+              "(I/O シーケンシャル化: %d chunks × %dM records)"
+              % (len(dataset), _sampler.n_chunks,
+                 _SvChunkShuffledSampler._CHUNK // 1_000_000))
     dl = DataLoader(dataset, batch_size=batch_size, shuffle=shuffle,
                     sampler=_sampler, **dlkw)
     if dlkw.get("num_workers", 0) > 0:
@@ -23439,31 +23956,8 @@ def _sv_avail_ram_mb():
         return psutil.virtual_memory().available // (1 << 20)
     except ImportError:
         pass
-    if os.name == "nt":
-        import ctypes
-
-        class _MS(ctypes.Structure):
-            _fields_ = [("dwLength", ctypes.c_uint32),
-                        ("dwMemoryLoad", ctypes.c_uint32),
-                        ("ullTotalPhys", ctypes.c_uint64),
-                        ("ullAvailPhys", ctypes.c_uint64),
-                        ("ullTotalPageFile", ctypes.c_uint64),
-                        ("ullAvailPageFile", ctypes.c_uint64),
-                        ("ullTotalVirtual", ctypes.c_uint64),
-                        ("ullAvailVirtual", ctypes.c_uint64),
-                        ("ullAvailExtendedVirtual", ctypes.c_uint64)]
-        ms = _MS(dwLength=ctypes.sizeof(_MS))
-        if ctypes.windll.kernel32.GlobalMemoryStatusEx(ctypes.byref(ms)):
-            return int(ms.ullAvailPhys) // (1 << 20)
-        return 8192
-    try:
-        with open("/proc/meminfo") as f:
-            for ln in f:
-                if ln.startswith("MemAvailable:"):
-                    return int(ln.split()[1]) // 1024
-    except OSError:
-        pass
-    return 8192
+    _, avail = _sys_ram_info()
+    return avail if avail is not None else 8192
 
 
 def sv_cmd_train(a):
@@ -23493,7 +23987,7 @@ def sv_cmd_train(a):
         _req_arch = {"ch": int(getattr(a, "ch", 96)),
                      "blocks": int(getattr(a, "blocks", 6)),
                      "ver": int(getattr(a, "ver", 1)),
-                     "img": int(getattr(a, "img", 256)),
+                     "img": int(sv_IMG),
                      "in_ch": 1 if sv_GRAY else 3}
         _ck_arch = (ck.get("arch") if isinstance(ck, dict) else None) \
                    or {"ch": 96, "blocks": 6, "ver": 1}
@@ -23535,8 +24029,8 @@ def sv_cmd_train(a):
         _worker_mb = 800 if _gpu_rend else 1200
         _batch_mb = (a.batch * (81 * 8 + 14 * 4 + 32) / 1e6 if _gpu_rend
                      else a.batch * ((1 if sv_GRAY else 3) * sv_IMG * sv_IMG * 4 + 1024) / 1e6)
-        _n_workers = max(1, min(_n_workers,
-                                int(_budget_mb // (_worker_mb + 4 * _batch_mb))))
+        _n_workers = _clamp(
+            int(_budget_mb // (_worker_mb + 4 * _batch_mb)), 1, _n_workers)
         _commit_mb = _sv_avail_commit_mb()
         if _commit_mb is not None:
             _cap = max(1, int((_commit_mb - 8192) // 2500))
@@ -23546,7 +24040,7 @@ def sv_cmd_train(a):
                       % (_commit_mb, _n_workers, _cap), flush=True)
             _n_workers = min(_n_workers, _cap)
         _left = _budget_mb - _n_workers * _worker_mb
-        _prefetch = int(max(2, min(4, _left / max(1e-9, _n_workers * _batch_mb))))
+        _prefetch = int(_clamp(_left / max(1e-9, _n_workers * _batch_mb), 2, 4))
         print("[train] RAM budget: %dMB free - 4096MB reserve -> workers=%d "
               "prefetch_factor=%d (batch~%.0fMB)"
               % (_budget_mb + 4096, _n_workers, _prefetch, _batch_mb), flush=True)
@@ -23570,7 +24064,6 @@ def sv_cmd_train(a):
         _dlkw.update(persistent_workers=True, prefetch_factor=_prefetch)
     if dev == "cuda" and hasattr(ds, "gpu_render"):
         ds.gpu_render = True
-    dl = _sv_safe_dataloader(ds, a.batch, True, _dlkw)
     val_dl = None
     if a.val_frac > 0 and len(ds) > 100:
         tr = SvStridedSplit(ds, a.val_frac, train=True)
@@ -23578,6 +24071,8 @@ def sv_cmd_train(a):
         dl = _sv_safe_dataloader(tr, a.batch, True, _dlkw)
         val_dl = DataLoader(va, batch_size=a.batch, num_workers=0)
         print("[train] val split: %d samples" % len(va))
+    else:
+        dl = _sv_safe_dataloader(ds, a.batch, True, _dlkw)
     opt = torch.optim.AdamW(model.parameters(), lr=a.lr, weight_decay=1e-4)
     steps_ep = min(len(dl), a.steps) if a.steps else len(dl)
     sched = torch.optim.lr_scheduler.CosineAnnealingLR(
@@ -23614,7 +24109,7 @@ def sv_cmd_train(a):
     def _save(ep):
         _arch = {"ch": int(getattr(a, "ch", 96)), "blocks": int(getattr(a, "blocks", 6)),
                  "ver": int(getattr(a, "ver", 1)),
-                 "img": int(getattr(a, "img", 256)),
+                 "img": int(sv_IMG),
                  "in_ch": 1 if sv_GRAY else 3,
                  "wr_slope": float(globals().get("sv_WR_SLOPE", 0.004))}
         d = {"model": model.state_dict(), "opt": opt.state_dict(),
@@ -23699,9 +24194,11 @@ def sv_cmd_train(a):
 
         _gpcal = _SvGpCal().to(dev)
         _gpcal_opt = torch.optim.Adam(_gpcal.parameters(), lr=2e-4)
+        _GPCAL_WARMUP_STEPS = 5000
         print("[train] [GP-FUSE] 有効: GP補助ヘッド + GP依存WRラベル + WR較正 "
-              "(early=%.4f late=%.4f offset=%.1f から開始)"
-              % (float(_gpcal.early.detach()), float(_gpcal.late.detach()), float(_gpcal.offset.detach())),
+              "(early=%.4f late=%.4f offset=%.1f から開始, warmup=%d steps)"
+              % (float(_gpcal.early.detach()), float(_gpcal.late.detach()), float(_gpcal.offset.detach()),
+                 _GPCAL_WARMUP_STEPS),
               flush=True)
 
     def _gpcal_write():
@@ -23765,19 +24262,20 @@ def sv_cmd_train(a):
                     l_side = F.binary_cross_entropy_with_logits(out["side"], side)
                     lR = l_cell + 0.2 * l_hand + 0.1 * l_side
                     if sv_GP_FUSE:
-                        mg = gp[:, 0] >= 0
-                        lG = (F.smooth_l1_loss(out["gp"][mg], gp[mg])
-                              if mg.any() else x.new_zeros(()))
+                        mg_f = (gp[:, 0] >= 0).float().unsqueeze(1)
+                        raw_gp = F.smooth_l1_loss(out["gp"], gp, reduction='none')
+                        lG = (raw_gp * mg_f).sum() / (mg_f.sum() * raw_gp.shape[1]).clamp(min=1)
                         lR = lR + 0.25 * lG
                     loss = lR
                     if full:
-                        mv = value >= 0
-                        lV = (F.binary_cross_entropy_with_logits(out["value"][mv], value[mv])
-                              if mv.any() else x.new_zeros(()))
-                        mp = policy >= 0
-                        lP = (F.cross_entropy(out["policy"][mp], policy[mp],
-                                              label_smoothing=0.1)
-                              if mp.any() else x.new_zeros(()))
+                        mv_f = (value >= 0).float()
+                        raw_v = F.binary_cross_entropy_with_logits(
+                            out["value"].view(-1), value, reduction='none')
+                        lV = (raw_v * mv_f).sum() / mv_f.sum().clamp(min=1)
+                        mp_f = (policy >= 0).float()
+                        raw_p = F.cross_entropy(out["policy"], policy.clamp(min=0),
+                                                label_smoothing=0.1, reduction='none')
+                        lP = (raw_p * mp_f).sum() / mp_f.sum().clamp(min=1)
                         loss = 0.3 * lR + 1.0 * lV + 1.0 * lP
                         tot["V"] += float(lV.detach()); tot["P"] += float(lP.detach())
                 with torch.no_grad():
@@ -23794,17 +24292,24 @@ def sv_cmd_train(a):
                     sched.step()
                 if ema is not None:
                     _ema_update()
-                if _gpcal is not None:
+                _gpcal_global_step = ep * (a.steps or len(dl)) + step
+                if _gpcal is not None and _gpcal_global_step >= _GPCAL_WARMUP_STEPS:
                     _mc = (cp > -1e8) & (gp[:, 0] >= 0)
-                    if _mc.any():
+                    _mc_idx = _mc.nonzero(as_tuple=False).view(-1)
+                    if _mc_idx.numel() > 0:
                         with torch.no_grad():
-                            _pv = torch.sigmoid(out["value"].detach().float())[_mc]
-                        _pc = _gpcal(cp.float()[_mc], gp[:, 0].float()[_mc])
+                            _pv = torch.sigmoid(out["value"].detach().float()).index_select(0, _mc_idx)
+                        _pc = _gpcal(cp.float().index_select(0, _mc_idx),
+                                     gp[:, 0].float().index_select(0, _mc_idx))
                         _lc = F.binary_cross_entropy(
                             torch.clamp(_pc, 1e-6, 1 - 1e-6), _pv)
                         _gpcal_opt.zero_grad(set_to_none=True)
                         _lc.backward()
+                        torch.nn.utils.clip_grad_norm_(_gpcal.parameters(), 1.0)
                         _gpcal_opt.step()
+                        with torch.no_grad():
+                            _gpcal.early.clamp_(min=1e-6)
+                            _gpcal.late.clamp_(min=1e-6)
                 if (step + 1) % 500 == 0:
                     print("[ep %d step %d] R=%.4f cell_acc=%.4f"
                           % (ep, step + 1, tot["R"] / tot["n"], tot["acc"] / tot["n"]),
@@ -23870,11 +24375,11 @@ def sv_cmd_train(a):
 def sv_policy_mask(b: SvBoard) -> "np.ndarray":
     m = np.zeros(sv_N_MOVE_LABELS, bool)
     for frm, pid in enumerate(b.cells):
-        if pid == 0 or SvBoard.pname(pid)[1] != b.side:
+        if pid == 0 or (pid - 1) // 14 != b.side:
             continue
         for to in range(81):
             p2 = b.cells[to]
-            if p2 and SvBoard.pname(p2)[1] == b.side:
+            if p2 and (p2 - 1) // 14 == b.side:
                 continue
             base = (frm * 81 + to) * 2
             m[base] = m[base + 1] = True
@@ -23890,7 +24395,7 @@ def sv_cmd_learn(a):
     global np, Image, ImageDraw, ImageFilter, ImageFont, _SV_OK
     _learn_cancel.clear()
     _total, _avail = _sys_ram_info()
-    _margin = int(_cfg.get("Resource_RAM_Safety_Margin_MB", 4096))
+    _margin = _RESOURCE_RAM_SAFETY_MARGIN_MB
     if _avail is not None and _avail < _margin + 2048:
         print("[learn] RAM 不足 (空き %dMB, 安全マージン %dMB + torch 所要 2048MB)。"
               "他のプロセスを閉じてください。" % (_avail, _margin), flush=True)
@@ -23952,7 +24457,7 @@ def sv_cmd_learn(a):
     kif_dirs = [a.kif] if a.kif else _kif_dirs()
     if not kif_dirs:
         _flog("[learn] aborted: no kif directory found")
-        print("[learn] 棋譜フォルダが見つかりません (C:\\kif, E:\\kif)")
+        print("[learn] 棋譜フォルダが見つかりません")
         return
     print("[learn] 棋譜フォルダ:", " ".join(kif_dirs), flush=True)
     work = a.work or os.path.join(os.path.dirname(os.path.abspath(a.out)) or ".", "pack")
@@ -23968,27 +24473,7 @@ def sv_cmd_learn(a):
             print("[learn] pack に失敗しました (棋譜 0 件?)")
             return
     _leaf_shard = os.path.join(work, "shard_leaf.bin")
-    if os.path.exists(_SV_LEAF_PATH):
-        try:
-            _lmeta = os.path.join(work, "pack_meta.json")
-            _lrb = (json.load(open(_lmeta)).get("record_bytes",
-                                                sv_PACK_DT.itemsize)
-                    if os.path.exists(_lmeta) else sv_PACK_DT.itemsize)
-            if _lrb != sv_PACK_DT.itemsize:
-                print("[learn] PV末端 skip: pack が旧形式 (record_bytes=%s)" % _lrb,
-                      flush=True)
-            else:
-                _lblob, _ln_cnt = _sv_pack_one_file((_SV_LEAF_PATH, 1.0, 0))
-                if _ln_cnt:
-                    with open(_leaf_shard, "wb") as _lf:
-                        _lf.write(_lblob)
-                    print("[learn] PV末端局面 %d 件を教材へ反映: shard_leaf.bin"
-                          % _ln_cnt, flush=True)
-                elif os.path.exists(_leaf_shard):
-                    os.remove(_leaf_shard)
-        except Exception as _le:
-            print("[learn] PV末端 pack 失敗 (続行):", repr(_le), flush=True)
-    elif os.path.exists(_leaf_shard):
+    if os.path.exists(_leaf_shard):
         try:
             os.remove(_leaf_shard)
         except OSError:
@@ -24110,7 +24595,7 @@ def _handle_learn(ctx, line):
         _flog("[learn] rejected: trainer already running (pid=%d)" % _lp_running.pid)
         return
 
-    if getattr(sys, "frozen", False):
+    if _IS_FROZEN:
         engine_dir = os.path.dirname(os.path.abspath(sys.executable))
         script = None
         for name in ("Pyfamate.py", "pyfamate.py"):
@@ -24134,7 +24619,7 @@ def _handle_learn(ctx, line):
                 pass
             return
         _flog(f"[learn] system Python 確保完了: {pycmd}")
-        if not _ensure_pip(pycmd):
+        if _pip_cmd(pycmd) is None:
             _flog("[learn] pip を用意できませんでした")
             try:
                 print("info string [learn] pip を用意できませんでした", flush=True)
@@ -24380,11 +24865,6 @@ def _dispatch(ctx, line):
 
 
 
-def _stab_exceeded(m):
-    spread = m.get("dl_stability_spread") or 0
-    eff_s  = m.get("eff_s") or 0.0
-    return spread > _calc_dl_model_aware_stability_threshold(eff_s, model_mb=_dl1_mb_for_stab, nodes=_params.get("POLICY_NODES", 2000))
-
 
 def _stats_avg(xs):
     return (sum(xs) / len(xs)) if xs else 0.0
@@ -24409,7 +24889,7 @@ def _stats_rate(recs, n_games):
 def _tuner_percentile(sorted_vals, p):
     if not sorted_vals:
         return None
-    idx = max(0, min(len(sorted_vals) - 1, int(len(sorted_vals) * p / 100)))
+    idx = _clamp(int(len(sorted_vals) * p / 100), 0, len(sorted_vals) - 1)
     return sorted_vals[idx]
 
 
@@ -24464,6 +24944,14 @@ def _tuner_load_records(path):
                 for move in game.get("moves", []):
                     move["_game_result"] = game.get("result", "unknown")
                     move["_formula_version"] = ver
+                    if ver and ver < "v6.7":
+                        move.pop("regime", None)
+                        move.pop("dl_gap_min_game_phase_coef", None)
+                        move.pop("dl_stab_game_phase_tighten", None)
+                        move["regime_conviction"] = None
+                        move["regime_label"] = None
+                        move["regime_collapse"] = None
+                        move["regime_force_crisis"] = None
                     records.append(move)
     except FileNotFoundError:
         print(f"[ERROR] ファイルが見つかりません: {path}", file=sys.stderr)
@@ -24487,10 +24975,10 @@ def _tuner_report(records, n_games, version_counter):
         if game_ver >= "v2.44":
             _time_aggression_vals.add(game_ver)
     if _time_aggression_vals:
-        lines.append(f"  ※ v2.44+ レコード含む — formula.time_aggression が stats に記録されています")
-        lines.append(f"    現在の実効値: DL_Time_Ratio={_tdg.dl_time_ratio:.3f}  DL_Time_Max={_tdg.dl_time_max_ms:.0f}ms  SlowMover={_nnue_1_opts.get('SlowMover','?')}  aggr={_tdg.time_aggression}")
+        lines.append("  ※ v2.44+ レコード含む — formula.time_aggression が stats に記録されています")
+        lines.append(f"    現在の実効値: DL_Time_Ratio={_time_dyn.dl_time_ratio:.3f}  DL_Time_Max={_time_dyn.dl_time_max_ms:.0f}ms  SlowMover={_nnue_1_opts.get('SlowMover','?')}  aggr={_time_dyn.time_aggression}")
     else:
-        lines.append(f"  現在の実効値 (v2.44): DL_Time_Ratio={_tdg.dl_time_ratio:.3f}  DL_Time_Max={_tdg.dl_time_max_ms:.0f}ms  SlowMover={_nnue_1_opts.get('SlowMover','?')}  aggr={_tdg.time_aggression}")
+        lines.append(f"  現在の実効値 (v2.44): DL_Time_Ratio={_time_dyn.dl_time_ratio:.3f}  DL_Time_Max={_time_dyn.dl_time_max_ms:.0f}ms  SlowMover={_nnue_1_opts.get('SlowMover','?')}  aggr={_time_dyn.time_aggression}")
 
     dl_moves = [m for m in records if m.get("dl_used")]
     cache_hit = [m for m in dl_moves if m.get("prefetch_hit")]
@@ -24652,41 +25140,9 @@ def _ab_compare_stats(path_a: str, path_b: str) -> str:
 
 
 
-_SPSA_FLOAT_PARAM_NAMES = frozenset({
-    "GP_Handover_Threshold",
-    "GP_Handover_Per_Sec",
-    "Inc_Spend_Ratio",
-    "Handover_Reverse_Hysteresis",
-    "Endgame_DL_Veto_WR_Margin",
-    "DL_Score_Gap_Min_Per_Sec",
-    "DL_Stability_Threshold_Per_Sec",
-    "SlowMover_Per_Sec",
-    "DL_Time_Ratio",
-    "DL_2_Time_Margin_Ratio",
-    "DL1_Council_Depth_Trust_Base", "DL1_Council_Depth_Trust_Per_Depth",
-    "DL1_Council_Depth_Trust_Min",  "DL1_Council_Depth_Trust_Max",
-    "DL1_GP_Trust_Min", "DL1_GP_Trust_Max",
-    "DL1_Council_PV_Overlap_Max_Boost",
-    "DL1_Council_Weight_Early", "DL1_Council_Weight_Late",
-    "DL2_Council_Weight_Early", "DL2_Council_Weight_Late",
-    "Time_Aggression",
-    "Time_Aggression_DL", "Time_Aggression_NNUE", "Time_Aggression_Rescue",
-    "DL3_Council_Weight",
-    "DL3_Proxy_Fuse_Alpha", "DL3_Proxy_Weight_Min", "DL3_Proxy_Weight_Max",
-    "DL3_Proxy_NNUE_Base_Weight",
-    "Council_WR_Scale_DL", "Council_WR_Scale_NNUE",
-    "Council_WR_Discount_Scale", "Council_WR_Discount_Min",
-    "Light_Council_Min_Eff_S", "Light_Council_Max_Eff_S", "Light_Council_DL3_Weight",
-    "MaxMin_Tie_Margin",
-    "GP_W_Hand", "GP_W_Promo", "GP_W_Camp", "GP_Scale",
-})
-
-
 def _spsa_param_is_int(p: dict) -> bool:
     if "is_int" in p:
         return bool(p["is_int"])
-    if p.get("name") in _SPSA_FLOAT_PARAM_NAMES:
-        return False
     for _k in ("min_val", "max_val", "step", "c"):
         _v = p.get(_k)
         if isinstance(_v, float) and not float(_v).is_integer():
@@ -24704,7 +25160,7 @@ class SpsaParam:
     is_int:  bool = True
 
     def clamp(self, v: float) -> float:
-        return max(self.min_val, min(self.max_val, v))
+        return _clamp(v, self.min_val, self.max_val)
 
     def config_value(self) -> "int | float":
         return int(round(self.value)) if self.is_int else round(self.value, 4)
@@ -24801,13 +25257,13 @@ def _spsa_default_params() -> list:
     _p("SlowMover_Min",     _scfg.slow_mover_min,     70,  140)
     _p("SlowMover_Max",     _scfg.slow_mover_max,     140, 270)
 
-    _dl_time_ratio_clamped = max(0.15, min(0.38, _tdg.dl_time_ratio))
+    _dl_time_ratio_clamped = _clamp(_time_dyn.dl_time_ratio, 0.15, 0.38)
     _p("DL_Time_Ratio",  _dl_time_ratio_clamped,  0.15, 0.38, c=0.02, is_int=False)
     _p("DL_Time_Min_ms", _dl_time_min_ms, 900,  2500)
-    _p("DL_Time_Max_ms", _tdg.dl_time_max_ms, 22000, 50000)
+    _p("DL_Time_Max_ms", _time_dyn.dl_time_max_ms, 22000, 50000)
 
     _p("DL_2_Time_Margin_Ratio",  _scfg.dl_2_margin_ratio,  0.3, 0.9, c=0.05, is_int=False)
-    _p("DL_2_Time_Margin_Min_ms", _tdg.dl_2_margin_min_ms, 2500, 7000)
+    _p("DL_2_Time_Margin_Min_ms", _time_dyn.dl_2_margin_min_ms, 2500, 7000)
     _p("DL_2_Time_Margin_Max_ms", _scfg.dl_2_margin_max_ms, 18000, 42000)
     _p("DL_2_Cold_Launch_Latency_Factor", _scfg.dl_2_cold_launch_latency_factor, 1.0, 6.0, c=0.3, is_int=False)
     _p("DL_2_Wall_Clock_Factor",          _scfg.dl_2_wall_clock_factor,          0.5, 2.5, c=0.15, is_int=False)
@@ -24831,7 +25287,6 @@ def _spsa_default_params() -> list:
 
     _p("Time_Aggression", _time_aggression_base, 0.55, 1.20, c=0.05, is_int=False)
 
-    _p("DL3_Council_Weight",        _scfg.dl_3_council_weight,        0.15, 0.55, c=0.05, is_int=False)
     _p("Council_Corr_Dampen",       _scfg.council_corr_dampen,        0.0,  0.5,  c=0.04, is_int=False)
     _p("DL3_Proxy_Fuse_Alpha",      _scfg.dl3_proxy_fuse_alpha,       0.0,  1.0,  c=0.08, is_int=False)
     _p("DL3_Proxy_Weight_Min",      _scfg.dl3_proxy_weight_min,       0.3,  1.0,  c=0.05, is_int=False)
@@ -24851,21 +25306,21 @@ def _spsa_default_params() -> list:
     _p("Council_WR_Discount_Min",   _scfg.council_wr_discount_min,    0.25,   0.60,   c=0.03,   is_int=False)
 
     _p("Endgame_Min_Eff_S",
-       min(3.0, max(0.8, _scfg.endgame_min_eff_s or 1.5)),
+       _clamp(_scfg.endgame_min_eff_s or 1.5, 0.8, 3.0),
                                                        0.8,  3.0,  c=0.15,  is_int=False)
     _p("Light_Council_Max_Eff_S",    float(_cfg.get("Light_Council_Max_Eff_S", 3.2674)),
                                                                    1.8,  4.5,  c=0.15,  is_int=False)
     _p("Light_Council_DL3_Weight",   _scfg.light_council_dl3_weight,   0.6,  1.5,  c=0.09,  is_int=False)
     _p("DL_Time_Ratio_Eff_S_Coef",   _dl_time_ratio_eff_s_coef, -0.02, 0.02, c=0.002, is_int=False)
 
-    _p("POLICY_NODES",             float(_params.get("POLICY_NODES", 2000)), 500, 6000, c=200)
+    _p("POLICY_NODES",             float(_params["POLICY_NODES"]), 500, 6000, c=200)
     _p("POLICY_NODES_Per_Eff_S",      _scfg.policy_nodes_per_eff_s,    300,  750,  c=30)
     _p("DL_2_Node_Ratio",          _dl_2_node_ratio,            0.3,  3.0,  c=0.10, is_int=False)
     _p("DL_Prefetch_Nodes",        float(_dl_prefetch_nodes),   200, 4000, c=150)
     _p("DL_Prefetch_IDP_Nodes",    float(_dl_prefetch_idp_nodes if _dl_prefetch_idp_nodes > 0
-                                         else _params.get("POLICY_NODES", 2000)),
+                                         else _params["POLICY_NODES"]),
                                                                 500, 8000, c=250)
-    _p("POLICY_MOVES",             float(_params.get("POLICY_MOVES", 10)), 3, 20, c=1)
+    _p("POLICY_MOVES",             float(_params["POLICY_MOVES"]), 3, 20, c=1)
 
     _p("Council_Override_Min_Diff_cp",     float(_cfg.get("Council_Override_Min_Diff_cp", 50)),
                                                                     45,  150, c=10)
@@ -24954,6 +25409,7 @@ def _spsa_default_params() -> list:
     _p("Trivial_Cap_Mate_Ply_Max",  float(_scfg.trivial_cap_mate_ply_max),             1, 15, c=1.0, is_int=True)
 
     _p("Endgame_DL_Veto_Min_Eff_S", float(_scfg.endgame_dl_veto_min_eff_s), 1.0, 4.0, c=0.15, is_int=False)
+    _p("Endgame_DL_Veto_DL1_Min_Eff_S", float(_scfg.endgame_dl_veto_dl1_min_eff_s), 10.0, 60.0, c=2.0, is_int=False)
 
     _p("DL3_Proxy_PV_Min_Depth",  float(_scfg.dl3_proxy_pv_min_depth),  4, 16, c=2)
     _p("Consensus_Skip_Min_Depth", float(_scfg.consensus_skip_min_depth), 3, 12, c=2)
@@ -25145,16 +25601,16 @@ def _posix_kill_marked_children(parent_pid, reason=""):
 
 def _posix_kill_pid_safe(pid) -> int:
     try:
-        _tgt_pg = os.getpgid(pid)
+        _target_pg = os.getpgid(pid)
     except Exception:
-        _tgt_pg = None
+        _target_pg = None
     try:
         _own_pg = os.getpgid(0)
     except Exception:
         _own_pg = None
     try:
-        if _tgt_pg is not None and _tgt_pg != _own_pg:
-            os.killpg(_tgt_pg, signal.SIGKILL)
+        if _target_pg is not None and _target_pg != _own_pg:
+            os.killpg(_target_pg, signal.SIGKILL)
         else:
             os.kill(pid, signal.SIGKILL)
         return 1
@@ -25261,6 +25717,35 @@ def _terminate_proc_full(proc, *, job=None, via_shell=False,
         _flog(f"[{name}] _terminate_proc_full error: {_e}")
 
 
+def _quit_engines(*engines, timeout: float = 20.0, label: str = "quit") -> None:
+    threads = []
+    for eng in engines:
+        t = threading.Thread(target=eng.quit, daemon=True,
+                             name=f"{label}-{getattr(eng, 'name', '?')}")
+        t.start()
+        threads.append((t, eng))
+    for t, eng in threads:
+        t.join(timeout=timeout)
+    for t, eng in threads:
+        if t.is_alive():
+            _flog(f"[{label}] quit thread still alive after {timeout}s — "
+                  f"force-killing {getattr(eng, 'name', '?')}")
+            try:
+                _spsa_kill_proc_tree(getattr(eng, "proc", None))
+            except Exception:
+                pass
+        try:
+            eng._wsl_reap()
+        except Exception:
+            pass
+        _ep = getattr(eng, "proc", None)
+        if _ep is not None:
+            try:
+                _ep.wait(timeout=3)
+            except Exception:
+                pass
+
+
 def _spsa_pgrp_kwargs() -> dict:
     return (
         {"creationflags": subprocess.CREATE_NEW_PROCESS_GROUP}
@@ -25270,14 +25755,14 @@ def _spsa_pgrp_kwargs() -> dict:
 
 
 def _spsa_engine_path() -> str:
-    if getattr(sys, "frozen", False):
+    if _IS_FROZEN:
         return sys.executable
     return os.path.abspath(__file__)
 
 
 def _spsa_engine_argv(mode: str) -> list:
     ep = _spsa_engine_path()
-    if getattr(sys, "frozen", False):
+    if _IS_FROZEN:
         return [ep, mode]
     return [sys.executable, ep, mode]
 
@@ -25307,7 +25792,7 @@ class _SpsaUsiEngine:
                                  _CONFIG_DEFAULTS.get("Resource_Budget_Enable", True))
                          ).strip().lower() in ("true", "1")
         _total_cores = _safe_cpu_count()
-        _wc = max(1, int(cfg.get("Tuning_Worker_Count", 2)))
+        _wc = _cint(cfg, "Tuning_Worker_Count", 2, lo=1)
         _fixed_per_child = sum(int(v) for v in
                                _SpsaUsiEngine._SELFPLAY_DL.values()) + 1
         _remaining = _total_cores - _wc * _fixed_per_child
@@ -25417,10 +25902,6 @@ class _SpsaUsiEngine:
         threading.Thread(target=_reader_thread, daemon=True,
                     name="%s_reader_%s" % (reader_name_prefix, label)).start()
 
-    @property
-    def label(self) -> str:
-        return self.name
-
     def send(self, cmd: str) -> None:
         if not self._alive or not self.proc or not self.proc.stdin:
             return
@@ -25472,7 +25953,7 @@ class _SpsaUsiEngine:
             self._wedge_snaps = _n + 1
             _SpsaUsiEngine._DIAG_SEQ += 1
             _dst = os.path.join(
-                _get_base_dir(), "spsa_child_diag_%s_%s_%04d.txt"
+                _BASE_DIR, "spsa_child_diag_%s_%s_%04d.txt"
                 % (tag, self.name, _SpsaUsiEngine._DIAG_SEQ))
             with open(_src, "rb") as _f:
                 _f.seek(0, os.SEEK_END)
@@ -25533,7 +26014,7 @@ class _SpsaUsiEngine:
                         _had_resign = False
                     _tag = "RESIGN_" if _had_resign else ""
                     _dst = os.path.join(
-                        _get_base_dir(),
+                        _BASE_DIR,
                         "spsa_child_diag_%s%s_%04d.txt"
                         % (_tag, self.name, _SpsaUsiEngine._DIAG_SEQ))
                     _sh_diag.copy2(_src, _dst)
@@ -25555,9 +26036,9 @@ class _SpsaUsiEngine:
         except Exception:
             pass
         _pat = f"PYFMTAG_.*_{_rk}_"
-        _tgts = [(d, ["wsl", "-d", d, "--", "pkill", "-9", "-f", _pat])
+        _targets = [(d, ["wsl", "-d", d, "--", "pkill", "-9", "-f", _pat])
                  for d in _ds] or [(None, ["wsl", "--", "pkill", "-9", "-f", _pat])]
-        for _d, _av in _tgts:
+        for _d, _av in _targets:
             try:
                 subprocess.run(
                     _av, timeout=5,
@@ -25695,20 +26176,33 @@ def _bestmove_is_for_board(usi_move: str, board) -> bool:
     return True
 
 
+def _sp_echo_reject(ctx, move: str, tag: str) -> bool:
+    if not move:
+        return False
+    board = _get_tracking_board(ctx)
+    if board is not None and not _bestmove_is_for_board(move, board):
+        _flog(f"[{tag}/SP-echo] {move!r} is not a move for the current board — rejecting")
+        _spd = ctx.game_progress.sp_move_diag
+        if _spd is not None:
+            _spd["sp_echo_rejected"] = _spd.get("sp_echo_rejected", 0) + 1
+        return True
+    return False
+
+
 def _spsa_init_engine(eng: "_SpsaUsiEngine") -> bool:
     eng.send("usi")
     if not eng.wait_for("usiok", timeout=60):
-        _flog("[SPSA-W][%s] usiok timeout" % eng.label)
+        _flog("[SPSA-W][%s] usiok timeout" % eng.name)
         _LIVE.reset()
-        print("[!] engine %s: usiok timeout (engine failed to start)" % eng.label, flush=True)
+        print("[!] engine %s: usiok timeout (engine failed to start)" % eng.name, flush=True)
         return False
     if _spsa_ponder_enabled():
         eng.send("setoption name USI_Ponder value true")
     eng.send("isready")
     if not eng.wait_for("readyok", timeout=120):
-        _flog("[SPSA-W][%s] readyok timeout" % eng.label)
+        _flog("[SPSA-W][%s] readyok timeout" % eng.name)
         _LIVE.reset()
-        print("[!] engine %s: readyok timeout (engine not responding)" % eng.label, flush=True)
+        print("[!] engine %s: readyok timeout (engine not responding)" % eng.name, flush=True)
         return False
     return True
 
@@ -25716,7 +26210,7 @@ def _spsa_init_engine(eng: "_SpsaUsiEngine") -> bool:
 def _spsa_kifu_path() -> str:
     _env = os.environ.get("SPSA_KIFU_PATH", None)
     if _env is None:
-        return os.path.join(_get_base_dir(), "spsa_selfplay.sfen")
+        return os.path.join(_BASE_DIR, "spsa_selfplay.sfen")
     _env = _env.strip()
     if _env.lower() in ("", "off", "none"):
         return ""
@@ -25793,15 +26287,6 @@ def _spsa_parse_tc_spec() -> list:
     overhead = int(os.environ.get("SPSA_TC_OVERHEAD_MS", "200"))
     raw = os.environ.get("SPSA_TC", "").strip()
     if not raw:
-        _byo_env = os.environ.get("SPSA_BYOYOMI", "").strip()
-        if _byo_env:
-            try:
-                _byo = int(_byo_env)
-                return [_SpsaTimeControl("byoyomi", 0, byoyomi_ms=_byo,
-                                         overhead_ms=overhead,
-                                         label="byoyomi(legacy,byo=%dms)" % _byo)]
-            except ValueError:
-                pass
         return _spsa_default_tcs(overhead)
     specs = []
     for chunk in raw.split(","):
@@ -25848,16 +26333,11 @@ def _send_gameover(eng_s, eng_g, result):
 
 def _selfplay_game(eng_sente: "_SpsaUsiEngine",
                     eng_gote:  "_SpsaUsiEngine",
-                    byoyomi_ms: int = 10000,
                     game_timeout_s: float = 2000.0,
-                    tc: "_SpsaTimeControl | None" = None,
+                    tc: "_SpsaTimeControl" = None,
                     opening: "str | None" = None,
                     sennichite_check: bool = True,
                     info: "dict | None" = None) -> str:
-    if tc is None:
-        tc = _SpsaTimeControl("byoyomi", 0, byoyomi_ms=byoyomi_ms,
-                              label="byoyomi(legacy,byo=%dms)" % byoyomi_ms)
-
     _prefix, _base_moves = _sprt_split_opening_core(opening)
     _board = None
     _check_flags: list = []
@@ -25910,26 +26390,26 @@ def _selfplay_game(eng_sente: "_SpsaUsiEngine",
         r'^([1-9][a-i][1-9][a-i]\+?|[PLNSBRGplnsbrgK]\*[1-9][a-i])$'
     )
 
-    _pndr_on = _spsa_ponder_enabled()
-    _pndr: dict = {}
-    _pndr_hits = _pndr_miss = 0
-    _pndr_preempted: set = set()
+    _ponder_on = _spsa_ponder_enabled()
+    _ponder_map: dict = {}
+    _ponder_hits = _ponder_miss = 0
+    _ponder_preempted: set = set()
 
-    def _pndr_halt(eng) -> bool:
-        if eng not in _pndr:
+    def _ponder_halt(eng) -> bool:
+        if eng not in _ponder_map:
             return True
         try:
             _ok = eng.flush_with_stop(timeout=15.0)
             if not _ok:
                 _flog("[SPSA-W][PNDR] halt: flush_with_stop did not complete (%s) — "
-                      "_pndr に残置 (次回先打ち stop の対象)"
+                      "_ponder_map に残置 (次回先打ち stop の対象)"
                       % getattr(eng, "name", "?"))
                 return False
-            _pndr.pop(eng, None)
+            _ponder_map.pop(eng, None)
         except (KeyboardInterrupt, SystemExit, MemoryError):
             raise
         except Exception as _ponderhit_exc:
-            _flog("[SPSA-W][PNDR] halt error (%s): %r — _pndr に残置"
+            _flog("[SPSA-W][PNDR] halt error (%s): %r — _ponder_map に残置"
                   % (getattr(eng, "name", "?"), _ponderhit_exc))
             return False
         return True
@@ -25954,21 +26434,21 @@ def _selfplay_game(eng_sente: "_SpsaUsiEngine",
             (" moves " + " ".join(_all_moves)) if _all_moves else "")
         _barrier_ok = True
         _t_hit = None
-        _was_preempted = thinker in _pndr_preempted
-        _pndr_preempted.discard(thinker)
-        if thinker in _pndr:
-            _pred, _pred_key = _pndr[thinker]
+        _was_preempted = thinker in _ponder_preempted
+        _ponder_preempted.discard(thinker)
+        if thinker in _ponder_map:
+            _pred, _pred_key = _ponder_map[thinker]
             if (not _was_preempted) and _ponder_is_hit(_pred_key, _board):
-                _pndr.pop(thinker, None)
+                _ponder_map.pop(thinker, None)
                 _t_hit = time.perf_counter()
                 _ponderhit_clock = _extract_clock_tokens(
                     _spsa_build_go_line(tc, btime_ms, wtime_ms))
                 thinker.send(("ponderhit " + _ponderhit_clock) if _ponderhit_clock else "ponderhit")
-                _pndr_hits += 1
+                _ponder_hits += 1
             else:
                 _non_thinker = eng_gote if is_sente else eng_sente
-                if _non_thinker in _pndr and not _was_preempted:
-                    _pndr_preempted.add(_non_thinker)
+                if _non_thinker in _ponder_map and not _was_preempted:
+                    _ponder_preempted.add(_non_thinker)
                     try:
                         _non_thinker.send("stop")
                     except Exception as _preempt_send_exc:
@@ -25978,13 +26458,13 @@ def _selfplay_game(eng_sente: "_SpsaUsiEngine",
                               % (getattr(_non_thinker, "name", "?"),
                                  _preempt_send_exc))
                     if not getattr(_non_thinker, "_alive", True):
-                        _pndr.pop(_non_thinker, None)
-                        _pndr_preempted.discard(_non_thinker)
+                        _ponder_map.pop(_non_thinker, None)
+                        _ponder_preempted.discard(_non_thinker)
                         _flog("[SPSA-W][PNDR-PREEMPT] non_thinker dead at "
-                              "preempt (%s): removed from _pndr"
+                              "preempt (%s): removed from _ponder_map"
                               % getattr(_non_thinker, "name", "?"))
-                _barrier_ok = _pndr_halt(thinker)
-                _pndr_miss += 1
+                _barrier_ok = _ponder_halt(thinker)
+                _ponder_miss += 1
                 if not _barrier_ok:
                     _restart_count += 1
                     if _restart_count > 2:
@@ -26000,7 +26480,7 @@ def _selfplay_game(eng_sente: "_SpsaUsiEngine",
                           % (getattr(thinker, "name", "?"), _restart_count))
                     if thinker.restart():
                         _barrier_ok = True
-                        _pndr.pop(thinker, None)
+                        _ponder_map.pop(thinker, None)
                         thinker.send("usinewgame")
                     else:
                         _flog("[SPSA-W][PNDR] restart failed → draw")
@@ -26014,10 +26494,10 @@ def _selfplay_game(eng_sente: "_SpsaUsiEngine",
         if _t_hit is None:
             if not _all_moves and _prefix == "startpos" and is_sente:
                 bestmove = "2g2f"
-                _pndr_hint = ""
+                _ponder_hint = ""
                 _fast_first = True
             else:
-                if not _pndr_on:
+                if not _ponder_on:
                     (eng_gote if is_sente else eng_sente).send(pos)
                 thinker.send(pos)
                 thinker.send(_spsa_build_go_line(tc, btime_ms, wtime_ms))
@@ -26027,24 +26507,24 @@ def _selfplay_game(eng_sente: "_SpsaUsiEngine",
         _stop_cushion_ms = max(50.0, float(tc.overhead_ms) + 300.0)
         _main_budget_ms = max(0.0, budget_ms - _stop_cushion_ms)
         wait_s = max(0.05, _main_budget_ms / 1000.0)
-        wait_s = min(wait_s, max(0.05, deadline - time.perf_counter()))
+        wait_s = _clamp(deadline - time.perf_counter(), 0.05, wait_s)
 
         if _fast_first:
             wait_s = 0
         else:
             bestmove = ""
-            _pndr_hint = ""
+            _ponder_hint = ""
         _t_think0 = _t_hit if _t_hit is not None else time.perf_counter()
         _is_hit_path = (_t_hit is not None)
 
         def _consume_bestmove(_line: str) -> bool:
-            nonlocal bestmove, _pndr_hint
+            nonlocal bestmove, _ponder_hint
             _bm_toks = _line.split() + ["", "", ""]
             _cand = _bm_toks[1]
             if not _cand:
                 return False
             bestmove = _cand
-            _pndr_hint = _bm_toks[3] if _bm_toks[2] == "ponder" else ""
+            _ponder_hint = _bm_toks[3] if _bm_toks[2] == "ponder" else ""
             return True
 
         _sp_echo_seen = False
@@ -26075,7 +26555,7 @@ def _selfplay_game(eng_sente: "_SpsaUsiEngine",
         _reader_revive_count = 0
         _hit_lines_seen = 0
         _hit_probe_stage = 0
-        _hit_probe_s = min(10.0, max(1.0, 0.25 * _main_budget_ms / 1000.0))
+        _hit_probe_s = _clamp(0.25 * _main_budget_ms / 1000.0, 1.0, 10.0)
         _hit_probe2_deadline = 0.0
         _hit_wd_base = _t_think0
         try:
@@ -26115,7 +26595,7 @@ def _selfplay_game(eng_sente: "_SpsaUsiEngine",
                           "(>= %.0fs) — abandoning main wait (stop window next)"
                           % (side, _sil_s, _silence_wd_s))
                     break
-                _rl_to = max(0.1, min(_rl_to, _silence_wd_s - _sil_s))
+                _rl_to = _clamp(_silence_wd_s - _sil_s, 0.1, _rl_to)
             if _is_hit_path and _hit_probe_stage < 2 and (
                     _hit_lines_seen == 0 or _hit_probe_stage == 1):
                 _now_wd = time.perf_counter()
@@ -26133,10 +26613,10 @@ def _selfplay_game(eng_sente: "_SpsaUsiEngine",
                         _hit_probe_stage = 1
                         _hit_probe2_deadline = _now_wd + max(
                             0.4, 2.0 * float(tc.overhead_ms) / 1000.0)
-                        _rl_to = max(0.1, min(_rl_to,
-                                              _hit_probe2_deadline - _now_wd))
+                        _rl_to = _clamp(
+                            _hit_probe2_deadline - _now_wd, 0.1, _rl_to)
                     else:
-                        _rl_to = max(0.1, min(_rl_to, _wd_next - _now_wd))
+                        _rl_to = _clamp(_wd_next - _now_wd, 0.1, _rl_to)
                 elif _hit_probe_stage == 1:
                     if _now_wd >= _hit_probe2_deadline:
                         _flog("[SPSA-W][%s] hit-watchdog: still silent after stop "
@@ -26153,10 +26633,10 @@ def _selfplay_game(eng_sente: "_SpsaUsiEngine",
                         dl2 = _now_wd + min(budget_ms / 1000.0,
                                             max(0.05, deadline - _now_wd))
                         continue
-                    _rl_to = max(0.1, min(_rl_to, _hit_probe2_deadline - _now_wd))
+                    _rl_to = _clamp(_hit_probe2_deadline - _now_wd, 0.1, _rl_to)
             line = thinker.readline(timeout=_rl_to)
             if line is None:
-                _thp_none = getattr(thinker, "_proc", None) or getattr(thinker, "proc", None)
+                _thp_none = _get_proc(thinker)
                 _none_dead = (_thp_none is not None and _thp_none.poll() is not None)
                 _flog("[SPSA-W][%s] readline=None "
                       "elapsed=%.3fs dl2_rem=%.3fs proc_dead=%s"
@@ -26172,9 +26652,9 @@ def _selfplay_game(eng_sente: "_SpsaUsiEngine",
                 _fresh_q = _rq.Queue()
                 thinker._q = _fresh_q
                 thinker._alive = True
-                _tgt_proc = thinker.proc
-                _tgt_self = thinker
-                def _recovery_reader(_p=_tgt_proc, _rqq=_fresh_q, _ts=_tgt_self):
+                _target_proc = thinker.proc
+                _target_self = thinker
+                def _recovery_reader(_p=_target_proc, _rqq=_fresh_q, _ts=_target_self):
                     try:
                         for _rl in _p.stdout:
                             _rqq.put(_rl.rstrip("\n"))
@@ -26190,7 +26670,7 @@ def _selfplay_game(eng_sente: "_SpsaUsiEngine",
                 time.sleep(0.1)
                 continue
             if not line:
-                _thp_poll = getattr(thinker, "_proc", None) or getattr(thinker, "proc", None)
+                _thp_poll = _get_proc(thinker)
                 if _thp_poll is not None and _thp_poll.poll() is not None:
                     _flog("[SPSA-W][%s] engine dead during main wait (rc=%s)"
                           % (side, _thp_poll.returncode))
@@ -26210,7 +26690,7 @@ def _selfplay_game(eng_sente: "_SpsaUsiEngine",
                             _LIVE.update_think_pv(policy=_dl_pol, pos=_sp_live_pos)
                     except Exception:
                         pass
-                elif _sp_live_active and line.startswith("info") and "depth" in line and "score" in line:
+                elif _sp_live_active and _is_scored_info(line):
                     _dm_sp = _RE_DEPTH.search(line)
                     if _dm_sp:
                         _scp_sp = 0
@@ -26220,7 +26700,7 @@ def _selfplay_game(eng_sente: "_SpsaUsiEngine",
                         else:
                             _mm_sp = _RE_MATE.search(line)
                             if _mm_sp:
-                                _scp_sp = 30000 if int(_mm_sp.group(1)) > 0 else -30000
+                                _scp_sp = _mate_sign_score(int(_mm_sp.group(1)))
                         _pv_sp = None
                         if " pv " in line:
                             _fpv_sp = _RE_PV_FULL.search(line)
@@ -26263,7 +26743,7 @@ def _selfplay_game(eng_sente: "_SpsaUsiEngine",
                       "(not a move for current board)"
                       % (side, " on ponderhit" if _is_hit_path else "", bestmove))
                 bestmove = ""
-                _pndr_hint = ""
+                _ponder_hint = ""
                 if _is_hit_path:
                     _flog("[SPSA-W][%s] SP-echo on ponderhit: stale residue "
                           "drained — re-arming hit-watchdog (no immediate "
@@ -26290,12 +26770,12 @@ def _selfplay_game(eng_sente: "_SpsaUsiEngine",
                       % (side, " on ponderhit" if _is_hit_path else "",
                          _sp_echo_seen, _barrier_ok, bestmove))
                 bestmove = ""
-                _pndr_hint = ""
+                _ponder_hint = ""
                 continue
             break
 
         if not bestmove:
-            _thp_chk = getattr(thinker, "_proc", None) or getattr(thinker, "proc", None)
+            _thp_chk = _get_proc(thinker)
             _proc_running = not (_thp_chk is not None and _thp_chk.poll() is not None)
             if _proc_running:
                 try:
@@ -26324,7 +26804,7 @@ def _selfplay_game(eng_sente: "_SpsaUsiEngine",
                     _sline = thinker.readline(
                         timeout=max(0.05, _stop_deadline - time.perf_counter()))
                     if _sline is None:
-                        _sw_thp = getattr(thinker, "_proc", None) or getattr(thinker, "proc", None)
+                        _sw_thp = _get_proc(thinker)
                         if _sw_thp is not None and _sw_thp.poll() is not None:
                             break
                         continue
@@ -26339,7 +26819,7 @@ def _selfplay_game(eng_sente: "_SpsaUsiEngine",
                         _flog("[SPSA-W][%s] SP-echo drained in stop window: %r"
                               % (side, bestmove))
                         bestmove = ""
-                        _pndr_hint = ""
+                        _ponder_hint = ""
                         continue
                     if (bestmove in ("resign", "win")
                             and not _barrier_ok):
@@ -26347,7 +26827,7 @@ def _selfplay_game(eng_sente: "_SpsaUsiEngine",
                               "SP-echo (sp_echo_seen=%s barrier_ok=%s): %r"
                               % (side, _sp_echo_seen, _barrier_ok, bestmove))
                         bestmove = ""
-                        _pndr_hint = ""
+                        _ponder_hint = ""
                         continue
                     _flog("[SPSA-W][%s] stop bestmove=%s" % (side, bestmove))
                     break
@@ -26355,7 +26835,7 @@ def _selfplay_game(eng_sente: "_SpsaUsiEngine",
 
         if not bestmove:
             _flag_limit = budget_ms + _stop_cushion_ms
-            _thp = getattr(thinker, "_proc", None) or getattr(thinker, "proc", None)
+            _thp = _get_proc(thinker)
             _proc_dead = (_thp is not None and _thp.poll() is not None)
             if _proc_dead:
                 _flog("[SPSA-W][%s] no bestmove + process dead (rc=%s) → draw "
@@ -26512,7 +26992,7 @@ def _selfplay_game(eng_sente: "_SpsaUsiEngine",
                             if _sp_last_line is not None:
                                 _sp_cand = json.loads(_sp_last_line)
                                 if _sp_cand.get("council_winner") == bestmove:
-                                    if _sp_cand.get("ply") in (None, _sp_ply_want):
+                                    if _sp_cand.get("ply") == _sp_ply_want:
                                         _sp_rec = _sp_cand
                                         break
                                     if not _sp_ply_warned:
@@ -26627,15 +27107,15 @@ def _selfplay_game(eng_sente: "_SpsaUsiEngine",
                       "(%s) — 残骸は次の flush/watchdog に委ねる"
                       % (side, getattr(thinker, "name", "?")))
 
-        if (_pndr_on and tc.main_ms > 0 and _pndr_hint and move_no + 1 < 512
+        if (_ponder_on and tc.main_ms > 0 and _ponder_hint and move_no + 1 < 512
                 and getattr(thinker, "_ponder_capable", True)
-                and _USI_MOVE_RE.match(_pndr_hint)):
+                and _USI_MOVE_RE.match(_ponder_hint)):
             _ppos = ("position " + _prefix + " moves "
-                     + " ".join(_base_moves + moves + [_pndr_hint]))
+                     + " ".join(_base_moves + moves + [_ponder_hint]))
             _pgl = _spsa_build_go_line(tc, btime_ms, wtime_ms)
             thinker.send(_ppos)
             thinker.send("go ponder" + _pgl[2:])
-            _pndr[thinker] = (_pndr_hint, _ponder_predicted_key(_board, _pndr_hint))
+            _ponder_map[thinker] = (_ponder_hint, _ponder_predicted_key(_board, _ponder_hint))
 
       _flog("[SPSA-W] draw by move limit")
       _kifu("draw")
@@ -26644,19 +27124,19 @@ def _selfplay_game(eng_sente: "_SpsaUsiEngine",
     finally:
         for _eng in (eng_sente, eng_gote):
             try:
-                if getattr(_eng, "_alive", False) and _eng in _pndr:
+                if _eng_alive(_eng) and _eng in _ponder_map:
                     _eng.send("stop")
             except (KeyboardInterrupt, SystemExit, MemoryError):
                 raise
             except Exception as _se:
                 _flog(f"[PNDR-PARALLEL-STOP] preempt send failed for "
                       f"{getattr(_eng, 'name', '?')}: {_se!r}")
-        _pndr_halt(eng_sente)
-        _pndr_halt(eng_gote)
-        if _pndr_on and (_pndr_hits or _pndr_miss):
-            _tot = _pndr_hits + _pndr_miss
+        _ponder_halt(eng_sente)
+        _ponder_halt(eng_gote)
+        if _ponder_on and (_ponder_hits or _ponder_miss):
+            _tot = _ponder_hits + _ponder_miss
             _flog("[SPSA-W][PNDR] ponder hit %d/%d (%.0f%%)"
-                  % (_pndr_hits, _tot, 100.0 * _pndr_hits / _tot))
+                  % (_ponder_hits, _tot, 100.0 * _ponder_hits / _tot))
 
 
 
@@ -26674,7 +27154,6 @@ def _spsa_builtin_worker(
     stats_plus:   str,
     stats_minus:  str,
     games_per_iter: int   = 2,
-    byoyomi_ms:     int   = 10000,
     swap_colors:    bool  = True,
     timeout_s:      float = 1800.0,
     game_offset:    int   = 0,
@@ -26682,7 +27161,6 @@ def _spsa_builtin_worker(
 ) -> bool | None:
     if not _caller_manages_loop:
         games_per_iter = int(os.environ.get("SPSA_GAMES", str(games_per_iter)))
-    byoyomi_ms     = int(os.environ.get("SPSA_BYOYOMI", str(byoyomi_ms)))
     game_timeout_s = timeout_s / max(games_per_iter, 1)
 
     _tc_specs = _spsa_parse_tc_spec()
@@ -26770,7 +27248,6 @@ def _spsa_builtin_worker(
         for _attempt in range(2):
             _ginfo: dict = {}
             result = _selfplay_game(eng_s, eng_g,
-                                     byoyomi_ms=byoyomi_ms,
                                      game_timeout_s=game_timeout_s,
                                      tc=_tc_game, info=_ginfo)
             _flog("[SPSA-W]   → %s (reason=%s attempt=%d)"
@@ -26814,28 +27291,7 @@ def _spsa_builtin_worker(
             _engine_dead = True
 
     _t_quit = time.perf_counter()
-    _qt_p = threading.Thread(target=eng_plus.quit, daemon=True, name="spsa-quit-p")
-    _qt_m = threading.Thread(target=eng_minus.quit, daemon=True, name="spsa-quit-m")
-    _qt_p.start(); _qt_m.start()
-    _qt_p.join(timeout=20.0); _qt_m.join(timeout=20.0)
-    for _qt, _eng in ((_qt_p, eng_plus), (_qt_m, eng_minus)):
-        if _qt.is_alive():
-            _flog("[SPSA-W] quit thread still alive after 20s — force-killing %s"
-                  % getattr(_eng, "name", "?"))
-            try:
-                _spsa_kill_proc_tree(getattr(_eng, "proc", None))
-            except Exception:
-                pass
-        try:
-            _eng._wsl_reap()
-        except Exception:
-            pass
-        _ep = getattr(_eng, "proc", None)
-        if _ep is not None:
-            try:
-                _ep.wait(timeout=3)
-            except Exception:
-                pass
+    _quit_engines(eng_plus, eng_minus, label="SPSA-W")
     _dur_update_quit("spsa-worker", (time.perf_counter() - _t_quit) / 2.0)
 
     _flog("[SPSA-W] match: plus=%d minus=%d" % (plus_wins, minus_wins))
@@ -26849,7 +27305,7 @@ def _spsa_salvage_stats(src_path: str, side: str, game_idx: int = -1,
     try:
         if not src_path or not os.path.exists(src_path):
             return
-        _dst = dest_path or os.path.join(_get_base_dir(), "stats.txt")
+        _dst = dest_path or os.path.join(_BASE_DIR, "stats.txt")
         _kept = []
         with open(src_path, encoding="utf-8", errors="replace") as _f:
             for _raw in _f:
@@ -26932,7 +27388,7 @@ def _spsa_run_match(cfg_plus: dict, cfg_minus: dict, match_cmd: str | None = Non
                 shell=True,
                 stdout=subprocess.PIPE,
                 stderr=subprocess.PIPE,
-                env=env, cwd=_get_base_dir(),
+                env=env, cwd=_BASE_DIR,
                 **_spsa_pgrp_kwargs(),
             )
         except Exception as e:
@@ -27007,7 +27463,7 @@ def _grid_search_cli():
     _gparser.add_argument("--baseline", default=None,
                           help="ベースライン spsa_config.txt のパス (省略時: 同ディレクトリ)")
     _gparser.add_argument("--out",
-                          default=os.path.join(_get_base_dir(), "grid_results.txt"),
+                          default=os.path.join(_BASE_DIR, "grid_results.txt"),
                           help="結果 JSON の出力先 (デフォルト <base_dir>/grid_results.txt)")
     _gargs = _gparser.parse_args(sys.argv[2:])
 
@@ -27086,7 +27542,7 @@ def _grid_search_cli():
         def _pre_tmpdir_cleanup(self):
             _spsa_salvage_stats(
                 self._stats_path, self.name,
-                dest_path=os.path.join(_get_base_dir(), "grid_stats.jsonl"))
+                dest_path=os.path.join(_BASE_DIR, "grid_stats.jsonl"))
             super()._pre_tmpdir_cleanup()
 
 
@@ -27128,20 +27584,7 @@ def _grid_search_cli():
                 continue
             result = _selfplay_game(eng_s, eng_g, tc=_tc_spsa)
             _send_gameover(eng_s, eng_g, result)
-            _gq_s = threading.Thread(target=eng_s.quit, daemon=True, name="grid-q-s")
-            _gq_g = threading.Thread(target=eng_g.quit, daemon=True, name="grid-q-g")
-            _gq_s.start(); _gq_g.start()
-            _gq_s.join(timeout=20.0); _gq_g.join(timeout=20.0)
-            for _gq_t, _gq_e in ((_gq_s, eng_s), (_gq_g, eng_g)):
-                if _gq_t.is_alive():
-                    try:
-                        _spsa_kill_proc_tree(getattr(_gq_e, "proc", None))
-                    except Exception:
-                        pass
-                try:
-                    _gq_e._wsl_reap()
-                except Exception:
-                    pass
+            _quit_engines(eng_s, eng_g, label="grid")
             if result == "sente_win":
                 if s_lbl == "cand": wins += 1
                 else:               losses += 1
@@ -27329,14 +27772,14 @@ def _spsa_cli(setup_mode: bool = False):
         games_per_iter = 1
     resume_path = _next_arg(args, "--resume", None)
     if setup_mode:
-        state_save_path = os.path.join(_get_base_dir(), "setup_state.txt")
+        state_save_path = os.path.join(_BASE_DIR, "setup_state.txt")
         _out_cfg_path   = _SETUP_CONFIG_PATH
         if resume_path is None and os.path.exists(state_save_path):
             resume_path = state_save_path
             print(f"[setup] 中断状態を検出 → 自動 resume: {state_save_path}",
                   flush=True)
     else:
-        state_save_path = os.path.join(_get_base_dir(), "spsa_state.txt")
+        state_save_path = os.path.join(_BASE_DIR, "spsa_state.txt")
         _out_cfg_path   = _SPSA_CONFIG_PATH
     _per_game_timeout_s = 1800.0
     match_timeout_s = _per_game_timeout_s * games_per_iter
@@ -27454,7 +27897,7 @@ def _spsa_cli(setup_mode: bool = False):
               "config を書き出しません。エンジンパス/初期化失敗を確認してください"
               % ("SETUP" if setup_mode else "SPSA", draws), flush=True)
         _spsa_save_state(state, state_save_path)
-        if len(sys.argv) > 1 and str(sys.argv[1]).strip().lower() in ("setup", "spsa"):
+        if len(sys.argv) > 1 and _norm_str(sys.argv[1]) in ("setup", "spsa"):
             sys.exit(1)
         return
     spsa_save_config(state, cfg_path=_out_cfg_path)
@@ -27756,7 +28199,7 @@ def _psv_file_sanity(path: str):
         with open(path, "rb") as f:
             raw = f.read(_PSV_RECORD_SIZE)
         data32 = _struct.unpack(_PSV_FMT, raw)[0]
-        ShogiBoard(sfen="sfen " + _decode_packed_sfen(data32))
+        ShogiBoard(sfen="sfen " + _fast_psfen_to_sfen(data32))
     except Exception as e:
         return (False, "first record decode failed: %s" % e)
     return (True, "ok")
@@ -27786,7 +28229,7 @@ def _sprt_load_openings_psv(path: str, min_cp: int = 100, max_cp: int = 400,
     out: list = []
     for data32 in cand:
         try:
-            op = "sfen " + _decode_packed_sfen(data32)
+            op = "sfen " + _fast_psfen_to_sfen(data32)
             ShogiBoard(sfen=op)
         except Exception as e:
             print("[SPRT] psv opening skipped (%s)" % e, flush=True)
@@ -27830,7 +28273,7 @@ def _sprt_cli(args: list) -> None:
             k, _, v = a.partition("=")
             kv[k.strip()] = v.strip()
 
-    base_dir = _get_base_dir()
+    base_dir = _BASE_DIR
     base_cfg = kv.get("base") or os.path.join(base_dir, "config.txt")
     if not os.path.exists(base_cfg):
         print("[SPRT] base config not found: %s" % base_cfg, flush=True)
@@ -28116,10 +28559,7 @@ def _corr_condition_mask_core(pol_errs: dict, names) -> list:
     if not names:
         return []
     length = len(next(iter(pol_errs.values()), []))
-    mask = []
-    for i in range(length):
-        mask.append(any(pol_errs[nm][i] is False for nm in names))
-    return mask
+    return [any(pol_errs[nm][i] is False for nm in names) for i in range(length)]
 
 
 def _corr_apply_mask_core(vec: list, mask: list) -> list:
@@ -28254,7 +28694,7 @@ def _corr_cli(args: list) -> None:
     stride = max(1, int(kv.get("stride", "1")))
     byoyomi = int(kv.get("byoyomi", "1000"))
     err_cp = int(kv.get("err_cp", "150"))
-    out_path = kv.get("out") or os.path.join(_get_base_dir(),
+    out_path = kv.get("out") or os.path.join(_BASE_DIR,
                                              "corr_results.txt")
     engines = _corr_resolve_engines(kv.get("engines", ""))
     if len(engines) < 2:
@@ -28441,6 +28881,7 @@ _USI_TO_CSA_PIECE = {
     "+P": "TO", "+L": "NY", "+N": "NK", "+S": "NG", "+B": "UM", "+R": "RY",
 }
 _CSA_PROMO = {"FU": "TO", "KY": "NY", "KE": "NK", "GI": "NG", "KA": "UM", "HI": "RY"}
+_CSA_PROMO_VALUES = frozenset(_CSA_PROMO.values())
 
 class ShogiBoard:
 
@@ -28772,8 +29213,7 @@ class ShogiBoard:
 
             from_usi = from_col_s + _CSA_ROW[from_row_s]
 
-            _PROMO_VALUES = frozenset(_CSA_PROMO.values())
-            if piece in _PROMO_VALUES:
+            if piece in _CSA_PROMO_VALUES:
                 from_col_i = int(from_col_s)
                 from_row_i = int(from_row_s)
                 piece_on_board = self.board.get((from_col_i, from_row_i), "")
@@ -29055,7 +29495,7 @@ def _csa_position_block_to_sfen(p_rows: dict, hand_lines: list, stm: str) -> str
             counts = {}
             i = 0
             while i + 4 <= len(body):
-                sq = body[i:i + 2]
+                _  = body[i:i + 2]
                 pt = body[i + 2:i + 4]
                 i += 4
                 usi_p = _CSA_TO_USI_PIECE.get(pt.upper())
@@ -29195,7 +29635,7 @@ def _parse_game_summary(lines: list[str]) -> dict:
                 _p_rows[_rank] = _body
             except ValueError:
                 pass
-        elif line.startswith("P+") or line.startswith("P-"):
+        elif line.startswith(("P+", "P-")):
             _saw_position_block = True
             _hand_lines.append(line)
         elif in_position and line in ("+", "-"):
@@ -29212,24 +29652,24 @@ def _parse_game_summary(lines: list[str]) -> dict:
                     except (ValueError, TypeError):
                         pass
         elif in_time:
-            _tgt = result if in_time == "common" else _per_side_time[in_time]
+            _target = result if in_time == "common" else _per_side_time[in_time]
             if line.startswith("Time_Unit:"):
                 _time_unit_ms = _parse_time_unit(line.split(":", 1)[1])
             elif line.startswith("Total_Time:"):
-                _tgt["total_ms"] = _safe_sec_to_ms(line.split(":", 1)[1],
-                                                   _tgt.get("total_ms", result["total_ms"]))
+                _target["total_ms"] = _safe_sec_to_ms(line.split(":", 1)[1],
+                                                   _target.get("total_ms", result["total_ms"]))
             elif line.startswith("Byoyomi:"):
-                _tgt["byoyomi_ms"] = _safe_sec_to_ms(line.split(":", 1)[1],
-                                                     _tgt.get("byoyomi_ms", result["byoyomi_ms"]))
+                _target["byoyomi_ms"] = _safe_sec_to_ms(line.split(":", 1)[1],
+                                                     _target.get("byoyomi_ms", result["byoyomi_ms"]))
                 if in_time == "common":
                     _byoyomi_seen = True
             elif line.startswith("Increment:"):
-                _tgt["increment_ms"] = _safe_sec_to_ms(line.split(":", 1)[1],
-                                                       _tgt.get("increment_ms", result["increment_ms"]))
+                _target["increment_ms"] = _safe_sec_to_ms(line.split(":", 1)[1],
+                                                       _target.get("increment_ms", result["increment_ms"]))
             elif line.startswith("Delay:"):
-                _tgt["delay_ms"] = _safe_sec_to_ms(line.split(":", 1)[1], 0)
+                _target["delay_ms"] = _safe_sec_to_ms(line.split(":", 1)[1], 0)
             elif line.startswith("Least_Time_Per_Move:"):
-                _tgt["least_per_move_ms"] = _safe_sec_to_ms(line.split(":", 1)[1], 0)
+                _target["least_per_move_ms"] = _safe_sec_to_ms(line.split(":", 1)[1], 0)
 
     result["time_unit_ms"] = _time_unit_ms
     _any_increment = (result["increment_ms"] > 0
@@ -29265,12 +29705,12 @@ def _parse_game_summary(lines: list[str]) -> dict:
             _scratch = ShogiBoard(sfen="startpos")
             _usi_inits = []
             for _cm in _init_move_csa:
-                _u = _scratch.csa_to_usi_move(_cm)
-                if not _u:
+                _usi_move = _scratch.csa_to_usi_move(_cm)
+                if not _usi_move:
                     _usi_inits = []
                     break
-                _usi_inits.append(_u)
-                _scratch.apply_usi(_u)
+                _usi_inits.append(_usi_move)
+                _scratch.apply_usi(_usi_move)
             if _usi_inits:
                 result["init_moves"] = _usi_inits
                 _flog(f"[CSA] 指定局面戦: 開始局面までの指し手 {len(_usi_inits)} 手を取り込み")
@@ -29388,15 +29828,23 @@ class CsaSocket:
 
 class _CsaGame:
 
+    @property
+    def turn(self) -> str:
+        return self._my_turn
+
+    @property
+    def opponent_turn(self) -> str:
+        return "-" if self._my_turn == "+" else "+"
+
     def __init__(self, ctx, sock: "CsaSocket", game_info: dict,
                  stop_event: "threading.Event"):
         self.ctx        = ctx
         self.sock       = sock
         self.stop_event = stop_event
+        self._wr_lock   = threading.Lock()
         self._last_sente_wr = None
 
-        self.turn         = game_info["turn"]
-        self.opponent_turn     = "-" if self.turn == "+" else "+"
+        self._my_turn     = game_info["turn"]
         self.sfen         = game_info["sfen"]
         _pst = game_info.get("per_side_time") or {}
 
@@ -29549,9 +29997,12 @@ class _CsaGame:
         self._bm_pv       = pv or ""
         self._bm_instant  = _BESTMOVE_IS_INSTANT
         if score_cp is not None:
-            _wr = _cp_to_winrate(score_cp, self.ctx.cfg.council_wr_scale_nnue)
-            self._last_sente_wr = (_wr if getattr(self.csa_board, "side", "b") == "b"
-                                   else 1.0 - _wr) * 100.0
+            _win_rate = _cp_to_winrate(score_cp, self.ctx.cfg.council_wr_scale_nnue)
+            with self._wr_lock:
+                self._last_sente_wr = (
+                    (_win_rate if getattr(self.csa_board, "side", "b") == "b"
+                     else 1.0 - _win_rate) * 100.0
+                )
         self._bm_event.set()
 
     def _wait_bestmove(self, timeout: float = 120.0):
@@ -29569,7 +30020,7 @@ class _CsaGame:
     def _move_relay_timeout(self) -> float:
         per_move_ms = self.increment_ms or self.byoyomi_ms or 10000
         try:
-            ratio = float(_tdg.dl_time_ratio)
+            ratio = float(_time_dyn.dl_time_ratio)
         except Exception:
             ratio = 0.22
         budget_ms = max(_dl_time_min_ms, per_move_ms * ratio)
@@ -29578,11 +30029,11 @@ class _CsaGame:
         cap_s = cap_ms / 1000.0 + 3.0
         is_byoyomi_only = (self.increment_ms == 0 and self.byoyomi_ms > 0)
         if is_byoyomi_only:
-            _base = max(2.0, min(timeout_s, cap_s))
+            _base = _clamp(cap_s, 2.0, timeout_s)
             if self.my_remaining_ms <= 0 and self._turn_start_perf is not None:
                 _byo_left_s = (self.byoyomi_ms - _move_overhead_ms
                                - self._turn_spent_ms()) / 1000.0
-                _base = max(1.0, min(_base, _byo_left_s))
+                _base = _clamp(_byo_left_s, 1.0, _base)
         else:
             rem_ms = max(0, self.my_remaining_ms
                          - _move_overhead_ms - self._turn_spent_ms())
@@ -29596,14 +30047,14 @@ class _CsaGame:
             return base_s
         cfg = self.ctx.cfg
         factor, action = _ponder_conf_cap_factor_core(
-            self.ctx.gps.ponder_conf_level,
+            self.ctx.game_progress.ponder_conf_level,
             cfg.ponder_conf_cap_conv,
             cfg.ponder_conf_cap_high,
             cfg.ponder_conf_cap_medium,
             cfg.ponder_conf_cap_low,
             cfg.ponder_conf_cap_floor,
         )
-        self.ctx.gps.ponder_conf_action = action
+        self.ctx.game_progress.ponder_conf_action = action
         if factor >= 1.0:
             return base_s
         return max(1.0, base_s * factor)
@@ -29614,7 +30065,7 @@ class _CsaGame:
         margin_ms = 30_000
         slice_ms = opponent_budget_ms + per_move_ms + margin_ms
         slice_s = slice_ms / 1000.0
-        return max(60.0, min(slice_s, 1800.0))
+        return _clamp(slice_s, 60.0, 1800.0)
 
     def _build_position(self, extra_moves=None) -> str:
         mv = self.moves + (extra_moves or [])
@@ -29655,14 +30106,16 @@ class _CsaGame:
         _opp = getattr(self, "opponent_remaining_ms", None)
         _s_ms = _mine if self.turn == "+" else _opp
         _g_ms = _opp if self.turn == "+" else _mine
+        with self._wr_lock:
+            _wr_to_display = self._last_sente_wr
         _LIVE.show(self.csa_board, move_no=self.move_count,
-                   last_move=_ja_disp, winrate=self._last_sente_wr,
+                   last_move=_ja_disp, winrate=_wr_to_display,
                    sente_time=_sr_fmt_clock(_s_ms),
                    gote_time=_sr_fmt_clock(_g_ms))
         _LIVE.start_clock(self.csa_board, _s_ms, _g_ms,
-                          active_sente=(self.turn != "+"),
+                          active_sente=(self.csa_board.side == "b"),
                           move_no=self.move_count,
-                          last_move=_ja_disp, winrate=self._last_sente_wr)
+                          last_move=_ja_disp, winrate=_wr_to_display)
         if self._zenrei is not None:
             _sf = self.csa_board.sfen()
             _pl = self.csa_board.ply
@@ -30006,7 +30459,7 @@ class _CsaGame:
         if _LIVE._ready():
             try:
                 if getattr(self, "_zenrei", None) is not None:
-                    _alt = getattr(getattr(self, "ctx", None), "gps", None)
+                    _alt = getattr(getattr(self, "ctx", None), "game_progress", None)
                     _alt = getattr(_alt, "ponder_alt_reply", None) if _alt is not None else None
                     _seen = set()
                     for _u in (ponder_move, _alt):
@@ -30023,16 +30476,18 @@ class _CsaGame:
                 _opp = getattr(self, "opponent_remaining_ms", None)
                 _s_ms = _mine if self.turn == "+" else _opp
                 _g_ms = _opp if self.turn == "+" else _mine
+                with self._wr_lock:
+                    _wr_to_display = self._last_sente_wr
                 _LIVE.show(self.csa_board, move_no=self.move_count,
                            last_move=getattr(self, "_live_last_move_ja", ""),
-                           winrate=self._last_sente_wr,
+                           winrate=_wr_to_display,
                            sente_time=_sr_fmt_clock(_s_ms),
                            gote_time=_sr_fmt_clock(_g_ms))
                 _LIVE.start_clock(self.csa_board, _s_ms, _g_ms,
-                                  active_sente=(self.turn != "+"),
+                                  active_sente=(self.csa_board.side == "b"),
                                   move_no=self.move_count,
                                   last_move=getattr(self, "_live_last_move_ja", ""),
-                                  winrate=self._last_sente_wr)
+                                  winrate=_wr_to_display)
             except Exception:
                 pass
         _flog(f"[CSA] go ponder issued: predicted_opp={ponder_move} "
@@ -30081,12 +30536,12 @@ class _CsaGame:
                     else None
                 )
                 _pconf_sp = (
-                    str(_nnue_1_opts.get("Stochastic_Ponder", "true")).strip().lower()
+                    _norm_str(_nnue_1_opts.get("Stochastic_Ponder", "true"))
                     == "true"
                 )
-                self.ctx.gps.ponder_elapsed_s = _pconf_elapsed
-                self.ctx.gps.ponder_hit       = True
-                self.ctx.gps.ponder_sp        = _pconf_sp
+                self.ctx.game_progress.ponder_elapsed_s = _pconf_elapsed
+                self.ctx.game_progress.ponder_hit       = True
+                self.ctx.game_progress.ponder_sp        = _pconf_sp
                 _dispatch(self.ctx, "ponderhit " + self._clock_options_str())
                 _pconf_min_s = getattr(self.ctx.cfg, "ponder_conf_min_elapsed_s", 1.5)
                 _pconf_level, _ = _ponder_conf_readiness_core(
@@ -30094,9 +30549,9 @@ class _CsaGame:
                     sp_configured=_pconf_sp,
                     ponder_elapsed_s=_pconf_elapsed,
                     min_elapsed_s=_pconf_min_s,
-                    ponder_move_agreement=self.ctx.gps.ponder_move_agreement,
+                    ponder_move_agreement=self.ctx.game_progress.ponder_move_agreement,
                 )
-                self.ctx.gps.ponder_conf_level = _pconf_level
+                self.ctx.game_progress.ponder_conf_level = _pconf_level
                 self.ponder_start_perf   = None
                 self.ponder_active       = False
                 self.ponder_usi_move     = None
@@ -30110,8 +30565,8 @@ class _CsaGame:
                            else "board-mismatch")
                 _flog(f"[CSA] Ponder MISS ({_reason}): "
                       f"expected={self.ponder_usi_move} got={usi_opp}")
-                self.ctx.gps.ponder_hit         = False
-                self.ctx.gps.ponder_miss_reason = _reason
+                self.ctx.game_progress.ponder_hit         = False
+                self.ctx.game_progress.ponder_miss_reason = _reason
                 self.ponder_start_perf = None
                 self.ctx.ps.mate_skip_pending = False
                 _dispatch(self.ctx, "stop")
@@ -30260,10 +30715,6 @@ class _CsaGame:
         L.append("$SITE:" + ("floodgate" if _profile not in ("dr",) else "denryusen"))
         _now_str = time.strftime("%Y/%m/%d %H:%M:%S")
         L.append("$START_TIME:" + _now_str)
-        _total_s  = (getattr(self, "my_increment_ms", 0) > 0
-                     and getattr(self, "byoyomi_ms", 0) == 0
-                     and (self.my_remaining_ms - self.my_increment_ms)
-                     or self.my_remaining_ms)
         _base_ms = max(0, int(getattr(self, "my_remaining_ms", 0)
                               - getattr(self, "my_increment_ms", 0)))
         _m, _s = divmod(_base_ms // 1000, 60)
@@ -30306,7 +30757,7 @@ class _CsaGame:
             return
         _dir = (globals().get("CSA_Kifu_Dir", "") or "").strip()
         if not _dir:
-            _dir = os.path.join(_get_base_dir(), "kif")
+            _dir = os.path.join(_BASE_DIR, "kif")
         try:
             os.makedirs(_dir, exist_ok=True)
         except Exception as e:
@@ -30356,24 +30807,17 @@ class _CsaGame:
                 e["_flushed"] = True
         end_lines = []
         _end = (self._end_reason or "").upper()
-        if _end in ("#TORYO", "#RESIGN"):
-            end_lines.append("%TORYO")
-        elif _end == "#KACHI":
-            end_lines.append("%KACHI")
-        elif _end == "#SENNICHITE":
-            end_lines.append("%SENNICHITE")
-        elif _end == "#OUTE_SENNICHITE":
-            end_lines.append("%ILLEGAL_MOVE")
-        elif _end in ("#ILLEGAL_MOVE", "#ILLEGAL_ACTION"):
-            end_lines.append("%ILLEGAL_MOVE")
-        elif _end == "#TIME_UP":
-            end_lines.append("%TIME_UP")
-        elif _end == "#JISHOGI":
-            end_lines.append("%JISHOGI")
-        elif _end == "#MAX_MOVES":
-            end_lines.append("%JISHOGI")
-        elif _end in ("#CHUDAN", "#CENSORED"):
-            pass
+        _END_SYM = {
+            "#TORYO": "%TORYO", "#RESIGN": "%TORYO",
+            "#KACHI": "%KACHI", "#SENNICHITE": "%SENNICHITE",
+            "#OUTE_SENNICHITE": "%ILLEGAL_MOVE",
+            "#ILLEGAL_MOVE": "%ILLEGAL_MOVE", "#ILLEGAL_ACTION": "%ILLEGAL_MOVE",
+            "#TIME_UP": "%TIME_UP",
+            "#JISHOGI": "%JISHOGI", "#MAX_MOVES": "%JISHOGI",
+        }
+        _sym = _END_SYM.get(_end)
+        if _sym:
+            end_lines.append(_sym)
         end_lines.append("$END_TIME:" + time.strftime("%Y/%m/%d %H:%M:%S"))
         end_lines.append(
             f"'result={self.result} reason={self._end_reason or '-'} "
@@ -30543,13 +30987,13 @@ def _csa_ensure_engines_idle(ctx, reason: str) -> None:
         if getattr(ctx, "prefetch", None) is not None:
             ctx.prefetch.cancel()
         if getattr(ctx, "ps", None) is not None and ctx.ps.active:
-            if getattr(ctx, "nnue_1", None) is not None and ctx.nnue_1._alive:
+            if _eng_alive(getattr(ctx, "nnue_1", None)):
                 ctx.nnue_1.send("stop")
             ctx.ps.active = False
         _wsl_shrink = []
         for _eng_attr in ("nnue_1", "nnue_2"):
             _eng = getattr(ctx, _eng_attr, None)
-            if (_eng is not None and getattr(_eng, "_alive", False)
+            if (_eng_alive(_eng)
                     and getattr(_eng, "_bat_path", None) is not None):
                 _orig = getattr(_eng, "_dyn_hash_original", None)
                 if _orig is None:
@@ -30616,10 +31060,6 @@ def _csa_finalize_kifu_on_disconnect(ctx):
 
 
 def _csa_main(args: list, existing_ctx=None) -> None:
-    _CSA_MAX_RECONNECT = 5
-    _CSA_RECONNECT_INTERVAL_S = 10.0
-    _CSA_RECONNECT_BACKOFF = 1.5
-
     import argparse as _argparse
 
     p = _argparse.ArgumentParser(prog="engine.py game", add_help=True)
@@ -30629,7 +31069,7 @@ def _csa_main(args: list, existing_ctx=None) -> None:
     p.add_argument("--password", default=None)
     _ns = p.parse_args(args)
 
-    _profile = str(_cfg.get("CSA_Server_Profile", _CONFIG_DEFAULTS["CSA_Server_Profile"])).strip().lower()
+    _profile = _norm_str(_cfg.get("CSA_Server_Profile", _CONFIG_DEFAULTS["CSA_Server_Profile"]))
     if _profile == "dr":
         _p_host = str(_cfg.get("Denryusen_Host",     _CONFIG_DEFAULTS["Denryusen_Host"]))
         _p_port = int(_cfg.get("Denryusen_Port",     _CONFIG_DEFAULTS["Denryusen_Port"]))
@@ -30685,7 +31125,7 @@ def _csa_main(args: list, existing_ctx=None) -> None:
 
     _ff_dead = [_n for _n, _e in (("nnue_1", getattr(ctx, "nnue_1", None)),
                                   ("dl_1", getattr(ctx, "dl_1", None)))
-                if _e is None or not getattr(_e, "_alive", False)]
+                if _e is None or not _eng_alive(_e)]
     if not _ff_dead:
         for _pn, _pe in (("nnue_1", ctx.nnue_1), ("dl_1", ctx.dl_1)):
             if not _pe.flush_until_ready(timeout=60.0):
@@ -30775,12 +31215,12 @@ def _csa_main(args: list, existing_ctx=None) -> None:
                     _opponent_name_local = (game_info.get("name_minus", "")
                                  if game_info.get("turn", "+") == "+"
                                  else game_info.get("name_plus", ""))
-                    ctx.gps.opponent_id_forced_style = _opponent_id_match_name_core(
+                    ctx.game_progress.opponent_id_forced_style = _opponent_id_match_name_core(
                         _opponent_name_local, _opponent_id_nnue_names, _opponent_id_dl_names,
                         _opponent_id_hybrid_names)
-                    if ctx.gps.opponent_id_forced_style is not None:
+                    if ctx.game_progress.opponent_id_forced_style is not None:
                         _flog(f"[OPP-ID] 相手名 {_opponent_name_local!r} → 系統断定 "
-                              f"{ctx.gps.opponent_id_forced_style} (検出器の予想を停止)")
+                              f"{ctx.game_progress.opponent_id_forced_style} (検出器の予想を停止)")
                     elif _opponent_name_local:
                         _flog(f"[OPP-ID] 相手名 {_opponent_name_local!r} は名簿未ヒット "
                               f"— 検出器 (Opponent_Style={_opponent_style}) に委譲")
@@ -30797,11 +31237,13 @@ def _csa_main(args: list, existing_ctx=None) -> None:
 
                     _LIVE.reset()
                     game = _CsaGame(ctx, sock, game_info, stop_event)
+                    ctx._current_csa_game = game
                     _set_bestmove_sink(game._on_bestmove)
                     try:
                         result = game.play()
                     finally:
                         _set_bestmove_sink(None)
+                        ctx._current_csa_game = None
 
                     games_done += 1
                     session_played = True
@@ -31495,18 +31937,21 @@ def _book_seed_pq_petanext(book, pq, root_key, eval_diff_cp, max_step,
     return seeded
 
 
-def _apply_book_result(book: dict, tempbook: list, loseturn: str) -> None:
-    bookpass = 0
+def _apply_book_result(book: dict, tempbook: list, loseturn: str) -> dict:
+    bookpass = {"killed": False, "evaporated": False}
     for i in reversed(tempbook):
-        if _book_turn_of_key(i[0]) == loseturn and bookpass == 0:
-            if i[0] in book:
+        if i[1] in ("resign", "win", ""):
+            continue
+        if _book_turn_of_key(i[0]) == loseturn and not bookpass["killed"]:
+            if i[0] in book and i[1] in book[i[0]]:
                 book[i[0]].pop(i[1], None)
+                bookpass["killed"] = True
                 if not book[i[0]]:
                     book.pop(i[0])
-                else:
-                    bookpass = 1
+                    bookpass["evaporated"] = True
         else:
             _book_bump_count(book, i[0], i[1], 1)
+    return bookpass
 
 
 def _makebook_collect_leaves(book: dict) -> list:
@@ -31585,7 +32030,7 @@ def _makebook_verify_leaves(book: dict, *, verify_s: float,
                 return None
             if _e.wait_for("readyok", timeout=5) is not None:
                 return True
-            if not getattr(_e, "_alive", False):
+            if not _eng_alive(_e):
                 return None
         return None
 
@@ -31639,8 +32084,8 @@ def _makebook_verify_leaves(book: dict, *, verify_s: float,
                               % (_i, len(leaves)))
                         break
                     summary["err"] += 1
-                    if not getattr(dl_eng, "_alive", False) or \
-                            not getattr(nn_eng, "_alive", False):
+                    if not _eng_alive(dl_eng) or \
+                            not _eng_alive(nn_eng):
                         print("[makebook][B10] 検証エンジン死亡 — 残りを中止 "
                               "(%d/%d 局面で停止)" % (_i, len(leaves)))
                         break
@@ -31735,7 +32180,7 @@ class _MakebookPolicyWidener:
         return self.multipv_max
 
     def widen(self, sfen_key: str):
-        if self.eng is None or not getattr(self.eng, "_alive", False):
+        if not _eng_alive(self.eng):
             return []
         if self._aborted():
             return []
@@ -31800,7 +32245,7 @@ def _makebook_cli(extra_args: list) -> None:
     def _mb_unattended() -> bool:
         v = _cli_kv.get("unattended", os.environ.get("MAKEBOOK_UNATTENDED"))
         if v is not None:
-            return str(v).strip().lower() in ("1", "true", "yes", "on", "y")
+            return _norm_str(v) in ("1", "true", "yes", "on", "y")
         try:
             return not sys.stdin.isatty()
         except Exception:
@@ -31841,7 +32286,7 @@ def _makebook_cli(extra_args: list) -> None:
         return v
 
 
-    _base_cfg = os.path.join(_get_base_dir(), "config.txt")
+    _base_cfg = os.path.join(_BASE_DIR, "config.txt")
     if not os.path.exists(_base_cfg):
         try:
             with open(_base_cfg, "w", encoding="utf-8") as _f:
@@ -31849,7 +32294,7 @@ def _makebook_cli(extra_args: list) -> None:
         except Exception as _e:
             print("[makebook] config.txt 生成失敗: %s" % _e)
 
-    book = dict()
+    book = {}
     book0 = None
 
     readbook = _mb_setting(
@@ -31900,11 +32345,11 @@ def _makebook_cli(extra_args: list) -> None:
             "定跡の穴探索モード？ b:先手定跡の穴を探す w:後手定跡の穴を探す それ以外:通常モード\n",
             "")
         if book_fix == "b" or book_fix == "w":
-            book0 = dict()
+            book0 = {}
             for i in book:
                 if _book_turn_of_key(i) == book_fix:
                     book0[i] = book[i]
-            book = dict()
+            book = {}
 
     basesfen = _mb_setting(
         "basesfen",
@@ -32078,7 +32523,7 @@ def _makebook_cli(extra_args: list) -> None:
     bookfile  = "book" + d + ".db"
     bookfile2 = "book" + d + "_2.db"
 
-    kif = list()
+    kif = []
     win = 0
     kif_total = 0
     endturn = [None]
@@ -32280,7 +32725,7 @@ def _makebook_cli(extra_args: list) -> None:
                             bad_threshold_cp, _game_phase_now, bad_cp_game_phase_coef)
                         _game_phase_note = (" game_phase=%.2f thr=%d"
                                     % (_game_phase_now, _eff_bad_threshold))
-                    except Exception as _game_phase_exc:
+                    except Exception:
                         _eff_bad_threshold = bad_threshold_cp
                         _game_phase_note = " game_phase=err"
                 if _book_is_bad_value(_val_cp, _eff_bad_threshold):
@@ -32335,7 +32780,7 @@ def _makebook_cli(extra_args: list) -> None:
                 else:
                     print("[makebook][B5] 優先局面起点の局 — 連勝カウント対象外")
 
-                _apply_book_result(book, tempbook, _book_turn_of_key(sfen))
+                _ = _apply_book_result(book, tempbook, _book_turn_of_key(sfen))
                 end = 1
 
             elif board.is_sennichite():
@@ -32344,7 +32789,7 @@ def _makebook_cli(extra_args: list) -> None:
                     win = 0
                 print("千日手")
                 if draw == "b" or draw == "w":
-                    _apply_book_result(book, tempbook, draw)
+                    _ = _apply_book_result(book, tempbook, draw)
                 end = 1
 
             elif max_book_ply > 0 and len(tempbook) >= max_book_ply:
@@ -32591,7 +33036,7 @@ def _game_phase_fit_value_grad(features, vec):
     game_phase_raw = core + bonus
     grad = [0.0] * 15
     if game_phase_raw <= 0.0 or game_phase_raw >= 1.5:
-        return (max(0.0, min(1.5, game_phase_raw)), grad)
+        return (_clamp(game_phase_raw, 0.0, 1.5), grad)
 
     dcore_dS = ex / sc
     grad[0] = dcore_dS * (WHAND / rH)
@@ -32666,13 +33111,13 @@ def _game_phase_fit_parse_csa_file(path):
         print(f"[game_phase_fit] ファイルを開けません: {path} ({e})")
         return results
 
-    _RESIGN_CMDS  = frozenset([
+    _RESIGN_CMDS  = frozenset({
         "%TORYO", "%KACHI", "%TIME_UP", "%ILLEGAL_MOVE",
         "%+ILLEGAL_ACTION", "%-ILLEGAL_ACTION",
-    ])
-    _DRAW_CMDS    = frozenset(["%HIKIWAKE", "%SENNICHITE", "%JISHOGI"])
+    })
+    _DRAW_CMDS    = frozenset({"%HIKIWAKE", "%SENNICHITE", "%JISHOGI"})
 
-    _HIRATE_P_NORM = frozenset([
+    _HIRATE_P_NORM = frozenset({
         "P1-KY-KE-GI-KI-OU-KI-GI-KE-KY",
         "P1-KY-KE-GI-KI-GY-KI-GI-KE-KY",
         "P2*-HI*****-KA*",
@@ -32684,7 +33129,7 @@ def _game_phase_fit_parse_csa_file(path):
         "P8*+KA*****+HI*",
         "P9+KY+KE+GI+KI+OU+KI+GI+KE+KY",
         "P9+KY+KE+GI+KI+GY+KI+GI+KE+KY",
-    ])
+    })
 
     def _flush(game_lines):
         board      = ShogiBoard()
@@ -32779,7 +33224,6 @@ def _game_phase_fit_parse_kif_file(path):
                 "６":"6","７":"7","８":"8","９":"9"}
     _ROW_USI = {"一":"a","二":"b","三":"c","四":"d","五":"e",
                 "六":"f","七":"g","八":"h","九":"i"}
-    _COL_NUM = {str(i): i for i in range(1, 10)}
     _ROW_NUM = {"a":1,"b":2,"c":3,"d":4,"e":5,"f":6,"g":7,"h":8,"i":9}
 
     try:
@@ -32810,7 +33254,7 @@ def _game_phase_fit_parse_kif_file(path):
             continue
         if not is_hirate:
             continue
-        if ln_s.startswith("変化") or ln_s.startswith("*") or ln_s.startswith("#"):
+        if ln_s.startswith(("変化", "*", "#")):
             continue
         if "指手" in ln_s and "手数" in ln_s:
             in_moves = True
@@ -32896,24 +33340,6 @@ def _game_phase_fit_parse_kif_file(path):
 _GPFIT_STRIDE = 12
 
 
-def _gpfit_migrate_8to12(src):
-    import array as _arr
-    n8 = len(src) // 8
-    out = _arr.array("f", bytes(n8 * 12 * 4))
-    for k in range(n8):
-        s = k * 8
-        d = k * 12
-        out[d]     = src[s]
-        out[d + 1] = src[s + 1]
-        out[d + 2] = src[s + 2]
-        out[d + 3] = src[s + 3]
-        out[d + 6] = src[s + 4]
-        out[d + 7] = src[s + 5]
-        out[d + 8] = src[s + 6]
-        out[d + 9] = src[s + 7]
-    return out
-
-
 class _GpfitPairArray:
     __slots__ = ("_a",)
 
@@ -32992,13 +33418,6 @@ def _game_phase_fit_pairs_from_chunk_value(v):
     if v is None:
         return []
     if isinstance(v, _arr.array):
-        _n = len(v)
-        if _n == 0:
-            return _GpfitPairArray(v)
-        if _n % _GPFIT_STRIDE == 0:
-            return _GpfitPairArray(v)
-        if _n % 8 == 0:
-            return _GpfitPairArray(_gpfit_migrate_8to12(v))
         return _GpfitPairArray(v)
     return v
 
@@ -33046,7 +33465,7 @@ def _game_phase_fit_build_samples(paths, max_games=0, pair_per_game=24,
                     _last_rec = _ckpt
                     _good_end = _cf.tell()
                     _ckpt3_n_chunks = 1
-                    _ckpt3_total_pairs = len(_ckpt.get("pairs") or ()) // 8
+                    _ckpt3_total_pairs = len(_ckpt.get("pairs") or ()) // _GPFIT_STRIDE
                     while True:
                         try:
                             _rec = _pickle.load(_cf)
@@ -33061,7 +33480,7 @@ def _game_phase_fit_build_samples(paths, max_games=0, pair_per_game=24,
                         _last_rec = _rec
                         _good_end = _cf.tell()
                         _ckpt3_n_chunks += 1
-                        _ckpt3_total_pairs += len(_rec.get("pairs") or ()) // 8
+                        _ckpt3_total_pairs += len(_rec.get("pairs") or ()) // _GPFIT_STRIDE
                     _file_end = _cf.seek(0, 2)
                     _resume_path_idx  = _last_rec["next_path_idx"]
                     n_games           = _last_rec["n_games"]
@@ -33084,55 +33503,9 @@ def _game_phase_fit_build_samples(paths, max_games=0, pair_per_game=24,
                         f"path_idx={_resume_path_idx:,}, 対局={n_games:,})")
                 print(_msg, flush=True)
                 _flog(_msg)
-            elif _ckpt_ver == "ckpt2":
-                _ckpt_mode = "ckpt2"
-                _ckpt_chunks = [
-                    {"file": _f, "n_pairs": _n}
-                    for _f, _n in zip(_ckpt["chunk_files"], _ckpt["chunk_n_pairs"])
-                ]
-                _resume_path_idx  = _ckpt["next_path_idx"]
-                n_games           = _ckpt["n_games"]
-                n_positions       = _ckpt["n_positions"]
-                n_onset           = _ckpt["n_onset"]
-                n_full            = _ckpt["n_full"]
-                n_nyugyoku        = _ckpt["n_nyugyoku"]
-                n_iso_pairs       = _ckpt["n_iso_pairs"]
-                n_val_games       = _ckpt["n_val_games"]
-                n_skipped_short   = _ckpt["n_skipped_short"]
-                _split_rnd.setstate(_ckpt["rnd_state"])
-                _total_pairs = sum(c["n_pairs"] for c in _ckpt_chunks)
-                _msg = (f"[game_phase_fit] チェックポイント復元(ckpt2): {checkpoint_path} "
-                        f"({len(_ckpt_chunks)} チャンク, ペア {_total_pairs:,}, "
-                        f"path_idx={_resume_path_idx:,}, 対局={n_games:,})")
-                print(_msg, flush=True)
-                _flog(_msg)
-            elif _ckpt_ver == "ckpt1":
-                _ckpt_mode = "ckpt2"
-                _legacy_chunks = _ckpt["chunks"]
-                _ckpt_chunks = []
-                for _li, _lc in enumerate(_legacy_chunks):
-                    _lf = f"{checkpoint_path}.chunk{_li:04d}"
-                    try:
-                        with open(_lf + ".tmp", "wb") as _cf:
-                            _pickle.dump(_lc, _cf, protocol=_pickle.HIGHEST_PROTOCOL)
-                        os.replace(_lf + ".tmp", _lf)
-                        _ckpt_chunks.append({"file": _lf, "n_pairs": len(_lc.get("pairs", []))})
-                    except Exception as _me:
-                        _flog(f"[game_phase_fit] ckpt1→ckpt2 移行中のチャンク書き出し失敗: {_me}")
-                _resume_path_idx  = _ckpt["next_path_idx"]
-                n_games           = _ckpt["n_games"]
-                n_positions       = _ckpt["n_positions"]
-                n_onset           = _ckpt["n_onset"]
-                n_full            = _ckpt["n_full"]
-                n_nyugyoku        = _ckpt["n_nyugyoku"]
-                n_iso_pairs       = _ckpt["n_iso_pairs"]
-                n_val_games       = _ckpt["n_val_games"]
-                n_skipped_short   = _ckpt["n_skipped_short"]
-                _split_rnd.setstate(_ckpt["rnd_state"])
-                _msg = (f"[game_phase_fit] チェックポイント復元(ckpt1→ckpt2移行): "
-                        f"{len(_ckpt_chunks)} チャンク, path_idx={_resume_path_idx:,}")
-                print(_msg, flush=True)
-                _flog(_msg)
+            elif _ckpt_ver in ("ckpt2", "ckpt1"):
+                raise ValueError(f"旧形式チェックポイント (version={_ckpt_ver}) は非対応。"
+                                 "ckpt3 で再生成してください。")
         except Exception as _ce:
             _msg = f"[game_phase_fit] チェックポイント読み込み失敗 ({type(_ce).__name__}: {_ce}) → 最初から構築"
             print(_msg, flush=True)
@@ -33280,7 +33653,7 @@ def _game_phase_fit_build_samples(paths, max_games=0, pair_per_game=24,
         ext = path.lower()
         if ext.endswith(".csa"):
             yield from _game_phase_fit_parse_csa_file(path)
-        elif ext.endswith(".kif") or ext.endswith(".ki2"):
+        elif ext.endswith((".kif", ".ki2")):
             yield from _game_phase_fit_parse_kif_file(path)
         else:
             try:
@@ -33923,7 +34296,7 @@ class _GpfitTorch:
         self._log(f"[game_phase_fit][GPT-VEC] tensors resident on {self.device}: "
                   f"{_mb:.0f}MB")
 
-    def _gp(self, F, cv, want_grad):
+    def _calc_game_phase(self, F, cv, want_grad):
         _t = self._t
         wH, wP, wC, wK, rH, rP, rC, rK, sc, on, fu, wPly, rPly, wE, rE = \
             [float(x) for x in cv]
@@ -33967,8 +34340,8 @@ class _GpfitTorch:
         g = _t.zeros(15, dtype=Fe.dtype, device=Fe.device) if want_grad else None
         for b in range(0, n, self._CHUNK):
             fe, fl = Fe[b:b + self._CHUNK], Fl[b:b + self._CHUNK]
-            gp_e, ge = self._gp(fe, cv, want_grad)
-            gp_l, gl = self._gp(fl, cv, want_grad)
+            gp_e, ge = self._calc_game_phase(fe, cv, want_grad)
+            gp_l, gl = self._calc_game_phase(fl, cv, want_grad)
             zz = k * ((gp_l - gp_e) - self.margin)
             sl += float(_t.nn.functional.softplus(-zz).sum().item())
             if want_grad:
@@ -34008,7 +34381,7 @@ class _GpfitTorch:
         if at is not None:
             feats, tgts = at
             na = feats.shape[0]
-            gp_v, gg = self._gp(feats, cv, want_grad)
+            gp_v, gg = self._calc_game_phase(feats, cv, want_grad)
             e = gp_v - tgts
             sa = float((e * e).sum().item())
             if want_grad:
@@ -34034,8 +34407,8 @@ class _GpfitTorch:
             band_n = [0, 0, 0]
             for b in range(0, Fe.shape[0], self._CHUNK):
                 fe, fl = Fe[b:b + self._CHUNK], Fl[b:b + self._CHUNK]
-                gp_e, _ = self._gp(fe, cv, False)
-                gp_l, _ = self._gp(fl, cv, False)
+                gp_e, _ = self._calc_game_phase(fe, cv, False)
+                gp_l, _ = self._calc_game_phase(fl, cv, False)
                 hit = gp_l > gp_e
                 hits += hit.sum()
                 ep = fe[:, 5]
@@ -34054,14 +34427,14 @@ class _GpfitTorch:
             Fe, Fl = it_
             iok = 0
             for b in range(0, Fe.shape[0], self._CHUNK):
-                gp_e, _ = self._gp(Fe[b:b + self._CHUNK], cv, False)
-                gp_l, _ = self._gp(Fl[b:b + self._CHUNK], cv, False)
+                gp_e, _ = self._calc_game_phase(Fe[b:b + self._CHUNK], cv, False)
+                gp_l, _ = self._calc_game_phase(Fl[b:b + self._CHUNK], cv, False)
                 iok += int((gp_l > gp_e).sum().item())
             lines.append(f"事象分離整合率 (single-event late>early): "
                          f"{iok}/{Fe.shape[0]} = {100.0 * iok / Fe.shape[0]:.1f}%")
         if at is not None:
             feats, tgts = at
-            gp_v, _ = self._gp(feats, cv, False)
+            gp_v, _ = self._calc_game_phase(feats, cv, False)
             err = (gp_v - tgts).abs()
             for tval, lbl in ((1.0, "onset(→1.0)"), (1.5, "full(→1.5)")):
                 msk = tgts == tval
@@ -34302,7 +34675,7 @@ def _game_phase_fit_cli(extra_args):
     if not raw_paths:
         raw_paths = _kif_dirs()
         if not raw_paths:
-            print("[game_phase_fit] 棋譜フォルダが見つかりません (C:\\kif, E:\\kif)")
+            print("[game_phase_fit] 棋譜フォルダが見つかりません")
             return
         print(f"[game_phase_fit] 棋譜フォルダ: {' '.join(raw_paths)}")
         _flog(f"[game_phase_fit] 棋譜フォルダ自動検出: {raw_paths}")
@@ -34360,7 +34733,7 @@ def _game_phase_fit_cli(extra_args):
         if _ram_total:
             _budget_mb = int(_ram_total * _ram_pct)
             if _ram_avail:
-                _budget_mb = min(_budget_mb, max(512, _ram_avail - 1024))
+                _budget_mb = _clamp(_ram_avail - 1024, 512, _budget_mb)
             max_pairs = max(100_000, int(_budget_mb * 1024 * 1024 / (32 * 2.4)))
             _msg = (f"[game_phase_fit][BUDGET] system ram={_ram_avail}/{_ram_total}MB free "
                     f"pct={_ram_pct} → ペア予算 {_budget_mb}MB "
@@ -34405,10 +34778,10 @@ def _game_phase_fit_cli(extra_args):
             if _cached.get("key") == _expected_key and "sample" in _cached:
                 sample = _cached["sample"]
                 st     = sample["stats"]
-                print(f"[game_phase_fit] キャッシュ読み込み完了: {cache_path}")
+                print(f"[game_phase_fit] キャッシュ読み込み完了: {cache_path!s}")
                 _flog(f"[game_phase_fit] キャッシュヒット: {cache_path}")
             else:
-                print(f"[game_phase_fit] キャッシュ無効（棋譜変更/形式更新検出）→ 再構築します。")
+                print("[game_phase_fit] キャッシュ無効（棋譜変更/形式更新検出）→ 再構築します。")
                 _flog("[game_phase_fit] キャッシュキー不一致 → rebuild")
         except Exception as _ce:
             print(f"[game_phase_fit] キャッシュ読み込み失敗 ({_ce}) → 再構築します。")
@@ -34545,7 +34918,7 @@ def _game_phase_fit_cli(extra_args):
           f"grad_clip={grad_clip} perturb={perturb_scale} "
           f"batch={batch_pairs or '全件'} workers={pool.n if pool else 1})")
 
-    out = "game_phase_fit_result.txt"
+    out = os.path.join(_BASE_DIR, "game_phase_fit_result.txt")
 
     def _game_phase_fit_write_result(vec_w, loss_w, it=None, metrics=None):
         tmp = out + ".tmp"
@@ -34648,6 +35021,144 @@ _HUF_BOARD = [
 _HUF_HAND_MATCH = [(code >> 1, bits - 1) for code, bits in _HUF_BOARD]
 
 
+_PSFEN_SQ_MAP = tuple((sq % 9) * 9 + 8 - (sq // 9) for sq in range(81))
+
+_PT_BASE_PIDX  = (0, 0, 1, 2, 3, 5, 6, 4, 7)
+_PT_PROM_PIDX  = (0, 8, 9, 10, 11, 12, 13)
+_PT_HAND_IDX   = (0, 0, 1, 2, 3, 5, 6, 4)
+
+_FAST_BOARD_LUT = [None] * 256
+for _v in range(256):
+    for _pt in range(8):
+        _c, _b = _HUF_BOARD[_pt]
+        if (_v & ((1 << _b) - 1)) == _c:
+            if _pt == 0:
+                _FAST_BOARD_LUT[_v] = (0, _b)
+            elif _pt == 7:
+                _FAST_BOARD_LUT[_v] = (1 + 4 + ((_v >> _b) & 1) * 14, _b + 1)
+            else:
+                _pm = (_v >> _b) & 1
+                _col = (_v >> (_b + 1)) & 1
+                _pi = _PT_PROM_PIDX[_pt] if _pm else _PT_BASE_PIDX[_pt]
+                _FAST_BOARD_LUT[_v] = (1 + _pi + _col * 14, _b + 2)
+            break
+_FAST_BOARD_LUT = tuple(_FAST_BOARD_LUT)
+
+_FAST_HAND_LUT = [None] * 128
+for _v in range(128):
+    for _pt in range(1, 8):
+        _c, _b = _HUF_HAND_MATCH[_pt]
+        if (_v & ((1 << _b) - 1)) == _c:
+            if _pt == 7:
+                _FAST_HAND_LUT[_v] = (_PT_HAND_IDX[_pt], (_v >> _b) & 1, _b + 1)
+            else:
+                _pm = (_v >> _b) & 1
+                _col = (_v >> (_b + 1)) & 1
+                _FAST_HAND_LUT[_v] = (-1 if _pm else _PT_HAND_IDX[_pt], _col, _b + 2)
+            break
+_FAST_HAND_LUT = tuple(_FAST_HAND_LUT)
+
+
+def _fast_decode_psfen_into(data32, sb):
+    bint = int.from_bytes(data32, 'little')
+    cells = sb.cells
+    hand0 = sb.hand[0]
+    hand1 = sb.hand[1]
+    sb.side = bint & 1
+    cur = 1
+    k0 = (bint >> 1) & 0x7F;  cur = 8
+    k1 = (bint >> 8) & 0x7F;  cur = 15
+    sqm = _PSFEN_SQ_MAP
+    if k0 < 81:
+        cells[sqm[k0]] = 8
+    if k1 < 81:
+        cells[sqm[k1]] = 22
+    blut = _FAST_BOARD_LUT
+    for sq in range(81):
+        if sq == k0 or sq == k1:
+            continue
+        v = (bint >> cur) & 0xFF
+        e = blut[v]
+        if e is None:
+            raise IndexError("psfen Huffman overrun bit %d" % cur)
+        cells[sqm[sq]] = e[0]
+        cur += e[1]
+    hlut = _FAST_HAND_LUT
+    while cur < 256:
+        v = (bint >> cur) & 0x7F
+        e = hlut[v]
+        if e is None:
+            raise IndexError("psfen hand overrun bit %d" % cur)
+        if e[0] >= 0:
+            if e[1] == 0:
+                hand0[e[0]] += 1
+            else:
+                hand1[e[0]] += 1
+        cur += e[2]
+
+
+def _move16_to_label(move16):
+    to_sq = move16 & 0x7f
+    if to_sq >= 81:
+        return -1
+    to_l = _PSFEN_SQ_MAP[to_sq]
+    if move16 & (1 << 14):
+        pt = (move16 >> 7) & 0x7f
+        if pt < 1 or pt > 7:
+            return -1
+        return 81 * 81 * 2 + _PT_HAND_IDX[pt] * 81 + to_l
+    from_sq = (move16 >> 7) & 0x7f
+    if from_sq >= 81:
+        return -1
+    return (_PSFEN_SQ_MAP[from_sq] * 81 + to_l) * 2 + ((move16 >> 15) & 1)
+
+
+_PID_SFEN = (None,
+    "P", "L", "N", "S", "G", "B", "R", "K",
+    "+P", "+L", "+N", "+S", "+B", "+R",
+    "p", "l", "n", "s", "g", "b", "r", "k",
+    "+p", "+l", "+n", "+s", "+b", "+r")
+
+
+def _svboard_to_sfen(sb):
+    cells = sb.cells
+    ranks = []
+    for r in range(9):
+        row = []; empty = 0
+        base = r * 9
+        for c in range(9):
+            pid = cells[base + c]
+            if pid == 0:
+                empty += 1
+            else:
+                if empty:
+                    row.append(str(empty)); empty = 0
+                row.append(_PID_SFEN[pid])
+        if empty:
+            row.append(str(empty))
+        ranks.append("".join(row))
+    board_str = "/".join(ranks)
+    turn = "b" if sb.side == 0 else "w"
+    hp = []
+    for owner in range(2):
+        h = sb.hand[owner]
+        for ki in (6, 5, 4, 3, 2, 1, 0):
+            n = h[ki]
+            if n > 0:
+                ch = "PLNSGBR"[ki]
+                if owner == 1: ch = ch.lower()
+                hp.append(("" if n == 1 else str(n)) + ch)
+    hand_str = "".join(hp) or "-"
+    return "%s %s %s %d" % (board_str, turn, hand_str, sb.ply)
+
+
+def _fast_psfen_to_sfen(data32):
+    sb = SvBoard()
+    _fast_decode_psfen_into(data32, sb)
+    return _svboard_to_sfen(sb)
+
+
+
 def _read_board_piece(bs: _BitStream):
     code = 0
     bits = 0
@@ -34747,7 +35258,6 @@ def _decode_packed_sfen(data32: bytes) -> str:
         ranks.append(row)
     board_str = "/".join(ranks)
 
-    hand_order = [6, 5, 4, 3, 2, 1, 7]
     hand_str = ""
     for color in range(2):
         for pt in [6, 5, 7, 4, 3, 2, 1]:
@@ -34796,7 +35306,7 @@ def _parse_psv_records(path: str, max_records: int):
                 break
             data32, score, move16, gamePly, result, _ = _struct.unpack(_PSV_FMT, raw)
             try:
-                sfen = _decode_packed_sfen(data32)
+                sfen = _fast_psfen_to_sfen(data32)
             except Exception as _de:
                 _flog(f"[teacher] packed-sfen decode error at record {count}: {_de}")
                 count += 1
@@ -34850,14 +35360,14 @@ def _pipeline_should_skip_core(step, marker_exists, force):
 
 
 def _pipeline_marker_path(step, prefix="pipeline"):
-    return os.path.join(_get_base_dir(), f"{prefix}_{step}.done")
+    return os.path.join(_BASE_DIR, f"{prefix}_{step}.done")
 
 
 def _pipeline_run_step(step, extra, prefix="pipeline", write_marker=True):
-    log_path = os.path.join(_get_base_dir(), f"{prefix}_{step}.log")
+    log_path = os.path.join(_BASE_DIR, f"{prefix}_{step}.log")
     extra = list(extra)
     if step == "spsa" and "--resume" not in extra:
-        _spsa_state = os.path.join(_get_base_dir(), "spsa_state.txt")
+        _spsa_state = os.path.join(_BASE_DIR, "spsa_state.txt")
         if os.path.exists(_spsa_state):
             extra += ["--resume", _spsa_state]
             print(f"[pipeline] spsa: 中断状態を検出 → --resume {_spsa_state}", flush=True)
@@ -34920,7 +35430,7 @@ def _fit_cli(args):
     force = _pipeline_force_core(args)
     results = []
     for s in canon:
-        _result_path = os.path.join(_get_base_dir(), "game_phase_fit_result.txt")
+        _result_path = os.path.join(_BASE_DIR, "game_phase_fit_result.txt")
         if _pipeline_should_skip_core(s, os.path.exists(_result_path), force):
             print(f"[fit] skip {s} (done — 再実行は force={s})", flush=True)
             results.append((s, 0, _result_path))
@@ -34962,14 +35472,14 @@ def _tournament_cli(args):
             _spsa_extra += ["--max-hours", "18"]
         per["spsa"] = _spsa_extra
     _STEP_RESULT = {
-        "dlp":   os.path.join(_get_base_dir(), "dlp_state.txt"),
-        "grid":  os.path.join(_get_base_dir(), "grid_results.txt"),
+        "dlp":   os.path.join(_BASE_DIR, "dlp_state.txt"),
+        "grid":  os.path.join(_BASE_DIR, "grid_results.txt"),
         "setup": _SETUP_CONFIG_PATH,
         "spsa":  _SPSA_CONFIG_PATH,
     }
     force = _pipeline_force_core(args)
     _hwfp = f"{sys.platform}:{os.cpu_count()}c:{_sys_gpu_count()}g"
-    _hwfp_path = os.path.join(_get_base_dir(), "tournament_hw.txt")
+    _hwfp_path = os.path.join(_BASE_DIR, "tournament_hw.txt")
     _hwfp_prev = None
     try:
         with open(_hwfp_path, encoding="utf-8") as _hf:
@@ -34982,7 +35492,7 @@ def _tournament_cli(args):
             print(f"[tournament] HW 指紋が不一致 (前回={_hwfp_prev or '記録なし'} "
                   f"現在={_hwfp}) — 別マシン由来の調整結果を .bak へ退避して"
                   "全工程をやり直します", flush=True)
-            _side_states = [os.path.join(_get_base_dir(), _sf)
+            _side_states = [os.path.join(_BASE_DIR, _sf)
                             for _sf in ("setup_state.txt", "spsa_state.txt")]
             for _inv in list(_STEP_RESULT.values()) + _side_states:
                 try:
@@ -35029,7 +35539,7 @@ def _dlponder_cli(args):
     print(f"[dlp-cal] 本番構成で {n_moves} 手のスクリプト対局 → 実 nps 較正 "
           f"(opponent_s シード={opponent_s}s)", flush=True)
     cmd = [sys.executable, os.path.abspath(__file__)]
-    _dlponder_log = os.path.join(_get_base_dir(), "dlp_cal.log")
+    _dlponder_log = os.path.join(_BASE_DIR, "dlp_cal.log")
     _dlponder_log_fh = open(_dlponder_log, "w", encoding="utf-8")
     _dlponder_env = dict(os.environ, PYTHONUTF8="1", PYFAMATE_DLP_CAL="1")
     p = _popen_utf8(cmd, stdin=subprocess.PIPE, stdout=subprocess.PIPE,
@@ -35040,7 +35550,7 @@ def _dlponder_cli(args):
         p.stdin.write(s + "\n")
         p.stdin.flush()
 
-    _stdout_q = queue.Queue()
+    _stdout_q = queue.Queue(maxsize=10000)
     def _stdout_reader():
         try:
             while True:
@@ -35132,7 +35642,7 @@ def _dlponder_cli(args):
             print("[dlp-cal] aborted: nps_ema=None — DL fetch never completed; "
                   "skip save to avoid poisoned state.txt (will re-calibrate on next start)",
                   flush=True)
-            if len(sys.argv) > 1 and str(sys.argv[1]).strip().lower() == "dlp":
+            if len(sys.argv) > 1 and _norm_str(sys.argv[1]) == "dlp":
                 sys.exit(1)
         else:
             _DLPONDER_STATE["opponent_s_ema"] = float(opponent_s)
@@ -35195,7 +35705,7 @@ def _cli_spsa(rest):
     if not _ensure_prereqs("spsa", rest):
         return
     _spsa_extra = _strip_skip(rest)
-    _state_path = os.path.join(_get_base_dir(), "spsa_state.txt")
+    _state_path = os.path.join(_BASE_DIR, "spsa_state.txt")
     _spsa_argv = [sys.argv[0], "--spsa", "--run"] + _spsa_extra
     if os.path.exists(_state_path) and "--resume" not in _spsa_extra:
         _spsa_argv += ["--resume", _state_path]
@@ -35251,12 +35761,12 @@ def _wdl_fit_cli(args):
         if "=" in a:
             k, _, v = a.partition("=")
             kv[k.strip()] = v.strip()
-    base = _get_base_dir()
+    base = _BASE_DIR
     path = kv.get("stats") or os.path.join(base, "stats.txt")
     n_bands = max(2, int(kv.get("bands", "4")))
     game_phase_split = float(kv.get("game_phase_split", "0.5"))
     min_n = int(kv.get("min_n", "50"))
-    fit_offset = str(kv.get("fit_offset", "1")).strip().lower() not in ("0", "false", "no")
+    fit_offset = _norm_str(kv.get("fit_offset", "1")) not in ("0", "false", "no")
     out = kv.get("out") or os.path.join(base, "wdl_fit.txt")
 
     _GAME_PHASE_MAX = 1.5
@@ -35281,15 +35791,14 @@ def _wdl_fit_cli(args):
     _prog_sum = {}
     _n_used = 0
     for rec in records:
-        o = _OUTCOME.get(str(rec.get("_game_result", "")).strip().lower())
+        o = _OUTCOME.get(_norm_str(rec.get("_game_result", "")))
         if o is None:
             continue
         game_phase = rec.get("game_phase")
         if game_phase is None:
             continue
         bi = _band_index(game_phase)
-        prog = float(game_phase)
-        prog = 0.0 if prog < 0.0 else 1.0 if prog > 1.0 else prog
+        prog = _clamp01(float(game_phase))
         _matched = False
         for fam, fld in _FAM.items():
             cp = rec.get(fld)
@@ -35443,11 +35952,15 @@ def _flip_find_cjk_font():
                  ("meiryo.ttc", "YuGothM.ttc", "YuGothR.ttc", "msgothic.ttc",
                   "BIZ-UDGothicR.ttc", "msmincho.ttc")]
     else:
-        import subprocess
-        r = subprocess.run(["fc-match", "-f", "%{file}", ":lang=ja"],
-                           capture_output=True, text=True, timeout=5)
-        if r.returncode == 0 and r.stdout.strip():
-            cands.append(r.stdout.strip())
+        import subprocess as _sp
+        try:
+            r = _sp.run(["fc-match", "-f", "%{file}", ":lang=ja"],
+                        capture_output=True, text=True, timeout=5,
+                        stdin=_sp.DEVNULL)
+            if r.returncode == 0 and r.stdout.strip():
+                cands.append(r.stdout.strip())
+        except Exception:
+            pass
         _names = ("NotoSansCJK", "NotoSerifCJK", "NotoSansJP", "SourceHanSans",
                   "SourceHanSerif", "ipag", "ipaexg", "ipam", "ipaexm",
                   "TakaoGothic", "VL-Gothic", "DroidSansJapanese", "Hiragino")
@@ -35461,6 +35974,112 @@ def _flip_find_cjk_font():
                     if any(nm.lower() in os.path.basename(p).lower() for nm in _names):
                         cands.append(p)
     from fontTools.ttLib import TTFont
+    def _scan(paths):
+        for p in paths:
+            if not os.path.exists(p):
+                continue
+            for idx in range(4):
+                try:
+                    cm = TTFont(p, fontNumber=idx).getBestCmap()
+                except Exception:
+                    break
+                if all(ord(ch) in cm for ch in _FLIP_PIECES):
+                    return (p, idx)
+        return None
+    hit = _scan(cands)
+    if hit:
+        return hit
+    if sys.platform.startswith("win") or not _auto_install_ok():
+        return None
+    hit = _auto_install_cjk_font()
+    return hit
+
+
+def _auto_install_cjk_font():
+    import shutil, subprocess as _sp
+    _flog("[AUTO-FONT] CJK フォント未検出 — 自動インストールを試行")
+    _installed = False
+    _pkg_cmds = []
+    if shutil.which("apt-get"):
+        _pkg_cmds = [["sudo", "-n", "apt-get", "install", "-y", "fonts-noto-cjk"]]
+    elif shutil.which("dnf"):
+        _pkg_cmds = [["sudo", "-n", "dnf", "install", "-y", "google-noto-sans-cjk-fonts"]]
+    elif shutil.which("pacman"):
+        _pkg_cmds = [["sudo", "-n", "pacman", "-S", "--noconfirm", "noto-fonts-cjk"]]
+    elif shutil.which("zypper"):
+        _pkg_cmds = [["sudo", "-n", "zypper", "install", "-y", "noto-sans-cjk-fonts"]]
+    elif shutil.which("brew"):
+        _pkg_cmds = [["brew", "install", "--cask", "font-noto-sans-cjk"]]
+    for cmd in _pkg_cmds:
+        try:
+            _flog(f"[AUTO-FONT] running: {' '.join(cmd)}")
+            r = _sp.run(cmd, capture_output=True, timeout=300,
+                        stdin=_sp.DEVNULL)
+            if r.returncode == 0:
+                _flog("[AUTO-FONT] パッケージインストール成功")
+                _installed = True
+                break
+            _flog(f"[AUTO-FONT] package install failed (rc={r.returncode}): "
+                  f"{(r.stderr or b'')[:200]}")
+        except Exception as e:
+            _flog(f"[AUTO-FONT] package install exception: {e!r}")
+    if not _installed:
+        _installed = _auto_install_cjk_font_user_local()
+    if _installed:
+        try:
+            _sp.run(["fc-cache", "-f"], capture_output=True, timeout=30,
+                    stdin=_sp.DEVNULL)
+        except Exception:
+            pass
+    return _rescan_cjk_fonts()
+
+
+def _auto_install_cjk_font_user_local():
+    import urllib.request, zipfile, io
+    _dest = os.path.join(os.path.expanduser("~"), ".local", "share", "fonts")
+    os.makedirs(_dest, exist_ok=True)
+    _urls = [
+        ("https://moji.or.jp/wp-content/ipafont/IPAexfont/IPAexfont00401.zip",
+         "ipaexg.ttf"),
+        ("https://moji.or.jp/wp-content/ipafont/IPAfont/IPAfont00303.zip",
+         "ipag.ttf"),
+    ]
+    for url, target_name in _urls:
+        try:
+            _flog(f"[AUTO-FONT] user-local DL: {url}")
+            req = urllib.request.Request(url, headers={"User-Agent": "Pyfamate/1.0"})
+            with urllib.request.urlopen(req, timeout=60) as resp:
+                data = resp.read()
+            with zipfile.ZipFile(io.BytesIO(data)) as zf:
+                for name in zf.namelist():
+                    if name.lower().endswith((".ttf", ".otf")):
+                        out_path = os.path.join(_dest, os.path.basename(name))
+                        with open(out_path, "wb") as f:
+                            f.write(zf.read(name))
+                        _flog(f"[AUTO-FONT] extracted: {out_path}")
+            _flog("[AUTO-FONT] user-local install 成功")
+            return True
+        except Exception as e:
+            _flog(f"[AUTO-FONT] user-local DL failed: {e!r}")
+    return False
+
+
+def _rescan_cjk_fonts():
+    import glob
+    from fontTools.ttLib import TTFont
+    _names = ("NotoSansCJK", "NotoSerifCJK", "NotoSansJP", "SourceHanSans",
+              "SourceHanSerif", "ipag", "ipaexg", "ipam", "ipaexm",
+              "TakaoGothic", "VL-Gothic")
+    cands = []
+    for base in ("/usr/share/fonts", "/usr/local/share/fonts",
+                 os.path.expanduser("~/.local/share/fonts"),
+                 os.path.expanduser("~/.fonts")):
+        if not os.path.isdir(base):
+            continue
+        for ext in ("ttf", "ttc", "otf"):
+            for p in glob.glob(os.path.join(base, "**", "*." + ext), recursive=True):
+                if any(nm.lower() in os.path.basename(p).lower() for nm in _names):
+                    cands.append(p)
     for p in cands:
         if not os.path.exists(p):
             continue
@@ -35470,7 +36089,9 @@ def _flip_find_cjk_font():
             except Exception:
                 break
             if all(ord(ch) in cm for ch in _FLIP_PIECES):
+                _flog(f"[AUTO-FONT] found: {p} (index {idx})")
                 return (p, idx)
+    _flog("[AUTO-FONT] インストール後もフォント未検出")
     return None
 
 
@@ -35694,7 +36315,7 @@ def _flip_strip_jsonc(text):
 
 
 def _flip_setup_windows_terminal(engine_dir):
-    import json, re
+    import json
 
     _preserve_comments = os.environ.get(
         "PYFAMATE_WT_PRESERVE_COMMENTS", "").strip().lower() in ("1", "true", "yes")
