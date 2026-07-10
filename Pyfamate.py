@@ -3529,8 +3529,8 @@ _CONFIG_DEFAULTS = {
     "DL_2_Max_GPU":                   "3",
     "DL_3_Max_GPU":                   "1",
     "DL_1_Disabled_GPU":              "",
-    "DL_2_Disabled_GPU":              "0,1,2,3",
-    "DL_3_Disabled_GPU":              "0,1,2,3,4,5,6",
+    "DL_2_Disabled_GPU":              "",
+    "DL_3_Disabled_GPU":              "",
     "ZF_Serve_Pool_Max":              "",
     "DL_PVMate_Dynamic":              False,
     "DL_PVMate_Main_Threads":         "",
@@ -6906,6 +6906,7 @@ class PonderState:
     nnue1_dirty:       bool                  = False
     dl_ponder_pos:     object                = None
     dl2_ponder_pos:    object                = None
+    last_eff_s:        object                = None
     def reset(self, handover_default: float) -> None:
         self.go_line           = None
         self.go_clock          = None
@@ -9075,6 +9076,9 @@ class EngineContext:
         self.game_log.clear()
         self.game_meta["endgame_triggered"] = False
         self.game_meta["result"]              = "unknown"
+        self.game_meta.pop("nno_promoted", None)
+        self.game_meta.pop("dlp_mode", None)
+        self.game_meta.pop("dlp_diff", None)
         self.ps.reset(_game_phase_handover_default)
         self.nnue_root_history.clear()
         self.game_progress.reset()
@@ -9269,7 +9273,7 @@ def _parse_go_clock_base(go_line, our_side_ply=None, cfg=None):
         cap_s = (remaining_ms * _eff_s_fischer_cap_ratio) / 1000.0
         if inc_ms > 0:
             _fischer_cap_floor_s = min((inc_ms / 1000.0) * 0.8,
-                                       remaining_ms / 1000.0)
+                                       max(0.0, (remaining_ms - _move_overhead_ms) / 1000.0))
             cap_s = max(cap_s, _fischer_cap_floor_s)
         if eff_s > cap_s:
             _dlog(f"_parse_go_clock: eff_s {eff_s:.2f}s -> {cap_s:.2f}s "
@@ -11559,13 +11563,13 @@ def relay_until_bestmove(eng, timeout=120, intercept_bestmove=False,
         _relay_factor = _clamp(_slow_mover_val / 200.0 * 1.25, 1.05, 1.25)
         _relay_cap = eff_s * _relay_factor
         _relay_binding_layer = "eff_s*factor"
-        _relay_min_floor = _clamp(2.0 * _move_overhead_s, _move_overhead_s, eff_s)
+        _relay_min_floor = min(eff_s, 2.0 * _move_overhead_s)
         if _relay_cap < _relay_min_floor:
             _relay_cap = _relay_min_floor
             _relay_binding_layer = "MO_floor"
         _rem_ceiling = None
         if remaining_ms is not None and remaining_ms > 0:
-            _rem_ceiling = max(1.0, remaining_ms / 1000.0 - _move_overhead_s)
+            _rem_ceiling = max(0.05, remaining_ms / 1000.0 - _move_overhead_s)
             if _relay_cap > _rem_ceiling:
                 _flog(
                     f"relay cap clamped by remaining: {_relay_cap:.2f}s -> "
@@ -12777,7 +12781,7 @@ def _deactivate_endgame(ctx, move_count=None, cur_game_phase=None,
                 try:
                     ctx.nnue_1.send("stop")
                     relay_until_bestmove(
-                        ctx.nnue_1, timeout=_stop_drain_timeout_safe(ctx, locals().get('eff_s')), intercept_bestmove=True,
+                        ctx.nnue_1, timeout=_stop_drain_timeout_safe(ctx, None), intercept_bestmove=True,
                         kill_on_empty=False)
                 except Exception as _ie:
                     _flog(f"[ignored] _deactivate_endgame: {_ie!r}")
@@ -13401,6 +13405,9 @@ def _mon_start(ctx):
 
 _NNUE_RESTART_LOCKS = {"nnue_1": threading.Lock()}
 
+_ARB1_NNUE2_READY = threading.Event()
+_ARB1_NNUE2_READY.set()
+
 
 def _restart_readyok_budget_s(ctx, default_s=30.0):
     try:
@@ -13443,21 +13450,6 @@ def _nnue2_wake_allowed_core(separate, promote_in_place, endgame_mode,
         return False
     return bool(endgame_mode) and not promote_in_place
 
-
-def _restart_nnue_2(ctx, caller, readyok_timeout=None, async_launch=False,
-                    force=False):
-    if not force and not _nnue2_wake_allowed_core(
-            _endgame_separate,
-            _endgame_promote_in_place,
-            ctx.endgame_mode,
-            ctx.nnue_health.unstable_2_mode):
-        _flog(f"[NNUE2-GATE] {caller}: nnue_2 wake DENIED "
-              f"(promote={int(_endgame_promote_in_place)} "
-              f"endgame={int(bool(ctx.endgame_mode))} "
-              f"separate={int(_endgame_separate)})")
-        return False
-    return _restart_nnue_impl(ctx, caller, slot="nnue_2",
-                              readyok_timeout=readyok_timeout, async_launch=async_launch)
 
 
 def _restart_nnue_impl(ctx, caller, *, slot, readyok_timeout=None, async_launch=False):
@@ -14469,6 +14461,7 @@ def _arb_prestart_wake_worker(ctx, cfg):
     eng = getattr(ctx, "nnue_2", None)
     if eng is None:
         return
+    _ARB1_NNUE2_READY.clear()
     _opts = _arb_prestart_arbiter_opts_core(_endgame_opts, cfg.arb1_nnue2_hash)
     try:
         _flog(f"[ARB1] nnue_2 async wake (arbiter): hash={_opts.get('USI_Hash')} "
@@ -14493,6 +14486,8 @@ def _arb_prestart_wake_worker(ctx, cfg):
         _flog(f"[ARB1] nnue_2 async wake failed (non-fatal): {_e}")
         _revive_register(ctx, "nnue_2", "nnue_2", eng, _opts,
                          cfg.arb1_prestart_timeout_s, post_warmup=True)
+    finally:
+        _ARB1_NNUE2_READY.set()
 
 
 def _arb_prestart_ensure_nnue_2(ctx, cfg, eff_s):
@@ -14501,7 +14496,7 @@ def _arb_prestart_ensure_nnue_2(ctx, cfg, eff_s):
     eng = getattr(ctx, "nnue_2", None)
     if eng is None:
         return None
-    if eng._alive:
+    if eng._alive and _ARB1_NNUE2_READY.is_set():
         return eng
     if _arb_prestart_wake_due_core(_endgame_separate, eng._alive,
                            cfg.arb1_prestart_nnue2,
@@ -16466,14 +16461,22 @@ def _run_council_search(ctx, line, move_count, dl_timeout,
             if _join_to_s <= 0.0:
                 _dl_2_thread.join(timeout=0)
                 if _dl_2_thread.is_alive():
+                    try:
+                        ctx.dl_2.send("stop")
+                    except Exception:
+                        pass
                     _dlog("[DL2-JOIN] budget exhausted (eff_s=%.1f elapsed=%.1fs) "
-                          "— DL_2 vote skipped this move (no wait)"
+                          "— DL_2 vote skipped this move (no wait), stop sent"
                           % (_eff_s, _join_elapsed_s))
             else:
                 _dl_2_thread.join(timeout=_join_to_s)
                 if _dl_2_thread.is_alive():
+                    try:
+                        ctx.dl_2.send("stop")
+                    except Exception:
+                        pass
                     _dlog("[DL2-JOIN] timeout after %.2fs (budget-clamped from %.2fs; "
-                          "eff_s=%.1f elapsed=%.1fs) — DL_2 thread still alive"
+                          "eff_s=%.1f elapsed=%.1fs) — DL_2 thread still alive, stop sent"
                           % (_join_to_s, ctx.cfg.dl_2_join_timeout_s, _eff_s, _join_elapsed_s))
         if _d2s.result is not None:
             _d2u = _unpack_dl2_result(
@@ -17531,12 +17534,23 @@ def _run_council_search(ctx, line, move_count, dl_timeout,
         nnue_pred=(_nnue_original_ponder if final_move == nnue_top_vote else None),
         dl_pred=_override_ponder_core(final_move, _dl_pv_lines))
 
-    _start_prefetch_after_bestmove(ctx, 
+    _alt_reply = _multi_ponder_alt_reply(_dl_pv_lines, final_move, ponder_move,
+        policy=policy, alt_min_gap=_cfloat(_cfg, "SMP_Alt_Min_Gap", 0.0))
+    if _alt_reply:
+        try:
+            _vb = ShogiBoard(track_history=False)
+            _vb.set(_position_after_move(ctx.current_position, final_move))
+            if not _vb.is_legal_lite(_alt_reply):
+                _flog(f"[SMP-ALT] alt_reply {_alt_reply!r} rejected: "
+                      f"is_legal_lite=False after {final_move}")
+                _alt_reply = None
+        except Exception:
+            _alt_reply = None
+    _start_prefetch_after_bestmove(ctx,
         _position_after_move(ctx.current_position, final_move),
         ponder_move,
         move_count,
-        alt_reply=_multi_ponder_alt_reply(_dl_pv_lines, final_move, ponder_move,
-            policy=policy, alt_min_gap=_cfloat(_cfg, "SMP_Alt_Min_Gap", 0.0)),
+        alt_reply=_alt_reply,
     )
     try:
         _cnsc = nnue_info.get("score_cp", 0) or 0
@@ -19305,35 +19319,10 @@ def _run_endgame_search(ctx, line, move_count, is_infinite,
         )
         _endgame_dl3_display_fetch(ctx, eff_s)
 
-    if use_dedicated and not eng._alive:
-        _restart_ok = _restart_nnue_2(ctx, "_run_endgame_search")
-        if not _restart_ok:
-            _flog("_run_endgame_search: nnue_2 restart failed — falling back to ctx.nnue_1")
-            eng = ctx.nnue_1
-            if not ctx.nnue_1._alive:
-                _flog("_run_endgame_search: fallback target nnue_1 also dead — restarting")
-                _n1_ok = _restart_nnue_1(ctx, "_run_endgame_search(fallback)")
-                if not _n1_ok:
-                    _flog("_run_endgame_search: nnue_1 restart ALSO failed — "
-                          "no usable engine this move")
-            if ctx.nnue_1._alive and ctx.ps.active:
-                _flog("_run_endgame_search: nnue_1 is pondering — sending stop")
-                ctx.nnue_1.send("stop")
-                _eg_drain_to = _clamp(
-                    go_clock.eff_s * 0.3 if go_clock else 2.0, 0.3, 2.0)
-                relay_until_bestmove(ctx.nnue_1, intercept_bestmove=True,
-                                     timeout=_eg_drain_to, kill_on_empty=False)
-                ctx.ps.active = False
-
     if not is_infinite:
-        if use_dedicated:
-            _apply_slow_mover(eng, _endgame_opts,
-                              ctx.cfg.nnue_2_slowmover_user_set, "ctx.nnue_2",
-                              go_clock=go_clock, cfg=ctx.cfg)
-        else:
-            _apply_slow_mover(eng, _nnue_1_opts,
-                              ctx.cfg.nnue_slowmover_user_set, "ctx.nnue_1",
-                              go_clock=go_clock, cfg=ctx.cfg)
+        _apply_slow_mover(eng, _nnue_1_opts,
+                          ctx.cfg.nnue_slowmover_user_set, "ctx.nnue_1",
+                          go_clock=go_clock, cfg=ctx.cfg)
 
     if not is_infinite and not _eng_alive(eng):
         _flog(f"[EMERGENCY] selected engine {getattr(eng, 'name', '?')} is dead — "
@@ -19645,7 +19634,7 @@ def _run_endgame_search(ctx, line, move_count, is_infinite,
                         ctx, _final_bestmove, nnue_info.get("score_cp"), eff_s,
                         dl_policy=_eg_veto_policy, dl_src=_eg_veto_src)
                     if _veto_move:
-                        _eg_arb_final = _veto_move
+                        _eg_arb_final = _final_bestmove
                         if ctx.cfg.arb_enable:
                             try:
                                 _eg_remaining_ms = _move_budget_left_s(
@@ -19678,10 +19667,10 @@ def _run_endgame_search(ctx, line, move_count, is_infinite,
                                     _flog(
                                         f"[ENDGAME-ARB] abstain "
                                         f"({_eg_arb_meta.get('reason')}) "
-                                        f"— DL veto accepted as-is")
+                                        f"— incumbent preserved (nnue={_final_bestmove})")
                             except Exception as _ea:
                                 _flog(f"[ENDGAME-ARB] failed ({_ea!r}) "
-                                      f"— DL veto accepted as-is")
+                                      f"— incumbent preserved (nnue={_final_bestmove})")
                         if _eg_arb_final == _final_bestmove:
                             _flog(f"[ENDGAME-ARB] DL veto overruled: "
                                   f"keeping nnue={_final_bestmove} "
@@ -20892,7 +20881,7 @@ def _handle_usinewgame(ctx, line):
                 _t.start()
                 _wr_threads.append(_t)
             for _t in _wr_threads:
-                _t.join()
+                _t.join(timeout=30.0)
             for _wr_k, _wr_ok in _wr_results.items():
                 if not _wr_ok:
                     _flog(f"[WSL-HASH-RESTORE] {_wr_k} は Hash 1MB のまま — 弱化/draw の温床")
@@ -20965,7 +20954,11 @@ def _handle_usinewgame(ctx, line):
         threading.Thread(target=_bg_dl3, daemon=True,
                          name="dl3-async-init").start()
     if _endgame_separate and ctx.nnue_2._alive:
-        ctx.nnue_2.send("usinewgame")
+        if _ARB1_NNUE2_READY.wait(timeout=3.0):
+            ctx.nnue_2.send("usinewgame")
+        else:
+            _flog("[usinewgame] nnue_2 wake in progress — skip "
+                  "(wake_worker が完了時に usinewgame 送信済み)")
     _ms_async_launched = False
     if ctx._zyfamate:
         _zf_caps = "solve" + ("+tsumero" if ctx._zyfamate_has_tsumero else "") + ("+tesuki" if ctx._zyfamate_has_tesuki else "")
@@ -21855,6 +21848,7 @@ def _handle_go(ctx, line):
     if _dl_ponder_enable:
         _t_drain_start = time.perf_counter()
         _harvest_mp_alt_on_go(ctx, eff_s=_eff_s_go)
+        _harvest_dl_ponders(ctx, ctx.current_position, eff_s=_eff_s_go)
         _stop_dl_ponders(ctx, "go ponder-miss/fresh-go", eff_s=_eff_s_go)
         _drain_elapsed_s = max(0.0, time.perf_counter() - _t_drain_start)
         if (_drain_elapsed_s > 0.05 and _clock_base is not None
@@ -21878,7 +21872,7 @@ def _handle_go(ctx, line):
         _gc_dead = None
         if not is_infinite:
             try:
-                _gc_dead, _, _ = _parse_go_clock_base(line, cfg=ctx.cfg)
+                _gc_dead, _, _ = _parse_go_clock_base(line, move_count, cfg=ctx.cfg)
                 _rem_s = (_gc_dead.remaining_ms / 1000.0 - _move_overhead_s) if _gc_dead.remaining_ms else 0.0
                 _ef = max(0.0, _gc_dead.eff_s or 0.0)
                 _readyok_to = _clamp(max(_ef * 2.0, _rem_s * 0.5), _move_overhead_s, 60.0)
@@ -21910,7 +21904,7 @@ def _handle_go(ctx, line):
                 return
             try:
                 if _gc_dead is None:
-                    _gc_dead, _, _ = _parse_go_clock_base(line, cfg=ctx.cfg)
+                    _gc_dead, _, _ = _parse_go_clock_base(line, move_count, cfg=ctx.cfg)
                 _wv_rem = (_gc_dead.remaining_ms or 0) / 1000.0 - _move_overhead_s
                 _wv_eff = max(0.0, _gc_dead.eff_s or 0.0)
                 _wv_deadline = _clamp(
@@ -22261,6 +22255,13 @@ def _ponderhit_try_collect_sp_early(ctx, position_cmd, eff_s, caller):
     _sp_bm, _sp_pd, _sp_ni = _drain_sp_early_bestmove(ctx.nnue_1, caller,
                                                   grace_s=_grace_s)
     if not _sp_bm:
+        if _sp_ni.get("__search_complete__"):
+            _flog(f"[{caller}/SP-IDLE] nnue_1 search complete (resign/win/none) "
+                  "— suppressing ponderhit, delegating to rescue cascade")
+            ctx.ps.active = False
+            ctx.ps.nnue1_ponder_sent = False
+            _flush_or_mark_dirty(ctx, f"{caller}/SP-IDLE-sync", eff_s)
+            return "", None, {"__search_complete__": True}
         return None
     if not ctx.nnue_1.bm_is_current():
         _flog(f"[{caller}/SP-GEN] early bestmove {_sp_bm!r} is stale "
@@ -22575,13 +22576,15 @@ def _ponderhit_handle_mate_skip(ctx, position_cmd, move_count):
     if ctx.ps.nnue1_ponder_sent and ctx.nnue_1._alive:
         ctx.ps.nnue1_ponder_sent = False
         ctx.nnue_1.send("stop")
-        relay_until_bestmove(ctx.nnue_1, timeout=_stop_drain_timeout_safe(ctx, locals().get('eff_s')), intercept_bestmove=True,
+        relay_until_bestmove(ctx.nnue_1, timeout=_stop_drain_timeout_safe(ctx, None), intercept_bestmove=True,
                              kill_on_empty=False)
 
     eng.send(position_cmd)
     eng.send("go movetime %d" % ctx.cfg.mate_skip_emergency_movetime_ms)
+    _ms_go_clock = _resolve_ponder_clock(ctx, "PH-MATE-SKIP")
     pm, ni = relay_until_bestmove(
         eng, timeout=max(3.0, ctx.cfg.mate_skip_emergency_movetime_ms / 1000.0 + 2.0),
+        go_clock=_ms_go_clock,
         intercept_bestmove=True,
     )
     bestmove, ponder = _unpack_bestmove(ni)
@@ -22663,7 +22666,7 @@ def _ponderhit_handle_stale(ctx, position_cmd, move_count):
     if ctx.ps.nnue1_ponder_sent and ctx.nnue_1._alive:
         ctx.ps.nnue1_ponder_sent = False
         ctx.nnue_1.send("stop")
-        relay_until_bestmove(ctx.nnue_1, timeout=_stop_drain_timeout_safe(ctx, locals().get('eff_s')), intercept_bestmove=True,
+        relay_until_bestmove(ctx.nnue_1, timeout=_stop_drain_timeout_safe(ctx, None), intercept_bestmove=True,
                              kill_on_empty=False)
         if ctx.nnue_1._alive:
             _pc_eff = ctx.ps.ponder_clock.eff_s if ctx.ps.ponder_clock else 0
@@ -22695,10 +22698,13 @@ def _ponderhit_handle_stale(ctx, position_cmd, move_count):
     )
     ctx.nnue_1.send(recovery_line)
     ponderhit_pv_holder = [None]
+    _stale_rem_ms = _ph_recovery_rem_ms(_clock_rem_ms)
     pm, ni = relay_until_bestmove(
         ctx.nnue_1, timeout=relay_timeout_s,
         partial_pv_holder=ponderhit_pv_holder,
         go_clock=go_clock,
+        remaining_ms=(max(1, int(_stale_rem_ms))
+                      if _stale_rem_ms is not None else None),
         intercept_bestmove=True,
     )
 
@@ -22776,11 +22782,14 @@ def _ponderhit_handle_cache_hit(ctx, position_cmd, move_count, ponderhit_pv_hold
             else:
                 _eg_relay_timeout = max(10.0, eff_s * 2.0)
             _phit_trace("eg_relay_start", to="%.1f" % _eg_relay_timeout)
+            _eg_1st_rem = _ph_recovery_rem_ms(_clock_rem_ms)
             _pm, _ni = relay_until_bestmove(
                 _eng, timeout=_eg_relay_timeout,
                 intercept_bestmove=True,
                 partial_pv_holder=_ponderhit_pv,
                 go_clock=go_clock,
+                remaining_ms=(max(1, int(_eg_1st_rem))
+                              if _eg_1st_rem is not None else None),
                 kill_on_empty=False)
         else:
             _eg_pc = getattr(ctx.ps, "ponder_clock", None)
@@ -22797,11 +22806,14 @@ def _ponderhit_handle_cache_hit(ctx, position_cmd, move_count, ponderhit_pv_hold
                               ctx.cfg.nnue_slowmover_user_set, "nnue_1-ph-cache", eff_s=eff_s, cfg=ctx.cfg)
             _eng.send(position_cmd)
             _eng.send(_ponderhit_ponder_line)
+            _eg_fresh_rem = _ph_recovery_rem_ms(_clock_rem_ms)
             _pm, _ni = relay_until_bestmove(
                 _eng, timeout=max(1.0, eff_s * 1.5) if eff_s else 10.0,
                 intercept_bestmove=True,
                 partial_pv_holder=_ponderhit_pv,
                 go_clock=go_clock,
+                remaining_ms=(max(1, int(_eg_fresh_rem))
+                              if _eg_fresh_rem is not None else None),
                 kill_on_empty=False)
         _bm = _ni.get("bestmove", "") if _ni else ""
         _pd = _ni.get("ponder") if _ni else None
@@ -22896,7 +22908,7 @@ def _ponderhit_handle_cache_hit(ctx, position_cmd, move_count, ponderhit_pv_hold
                 ctx, _bm, _ph_eg_score_cp, eff_s,
                 dl_policy=_ph_veto_policy, dl_src=_ph_veto_src)
             if _ph_veto_move:
-                _ph_eg_arb_final = _ph_veto_move
+                _ph_eg_arb_final = _bm
                 _ph_eg_veto_dl_move = _ph_veto_move
                 if ctx.cfg.arb_enable:
                     _ph_arb_live_cb = None
@@ -22912,7 +22924,8 @@ def _ponderhit_handle_cache_hit(ctx, position_cmd, move_count, ponderhit_pv_hold
                             game_phase=_game_phase_value,
                             eff_s=eff_s,
                             pre_boost_eff_s=eff_s,
-                            remaining_eff_ms=max(0.0, (_clock_rem_ms or 0)),
+                            remaining_eff_ms=max(0.0, eff_s * 1000.0
+                                - (time.perf_counter() - _t_ponderhit_start) * 1000.0),
                             clock_remaining_ms=_clock_rem_ms,
                             move_overhead_ms=_move_overhead_ms,
                             live_info_cb=_ph_arb_live_cb,
@@ -22924,10 +22937,10 @@ def _ponderhit_handle_cache_hit(ctx, position_cmd, move_count, ponderhit_pv_hold
                         else:
                             _flog(f"[PH-EG-VETO-ARB] abstain "
                                   f"({_ph_eg_arb_meta.get('reason')}) "
-                                  f"— DL_3 veto accepted as-is")
+                                  f"— incumbent preserved (nnue={_bm})")
                     except Exception as _ea:
                         _flog(f"[PH-EG-VETO-ARB] failed ({_ea!r}) "
-                              f"— DL_3 veto accepted as-is")
+                              f"— incumbent preserved (nnue={_bm})")
                 if _ph_eg_arb_final != _bm:
                     _flog(f"[PH-EG-VETO] override: nnue={_bm} → "
                           f"dl3={_ph_eg_arb_final} "
@@ -23002,12 +23015,15 @@ def _ponderhit_handle_cache_hit(ctx, position_cmd, move_count, ponderhit_pv_hold
         else:
             _chi_relay_timeout = max(10.0, eff_s * 2.0)
         _phit_trace("chi_relay_start", to="%.1f" % _chi_relay_timeout)
+        _chi_1st_rem = _ph_recovery_rem_ms(_clock_rem_ms)
 
         _pm, _ni = relay_until_bestmove(
             ctx.nnue_1, timeout=_chi_relay_timeout,
             intercept_bestmove=True,
             partial_pv_holder=_ponderhit_pv,
             go_clock=go_clock,
+            remaining_ms=(max(1, int(_chi_1st_rem))
+                          if _chi_1st_rem is not None else None),
             kill_on_empty=False)
         _phit_trace("chi_relay_end",
                   bm=(_ni.get("bestmove", "") if _ni else "") or "-")
@@ -23359,11 +23375,14 @@ def _ponderhit_handle_cache_miss(ctx, position_cmd, move_count, ponderhit_pv_hol
         ctx.nnue_1.send(f"go movetime {_bypass_movetime_ms}")
         _bypass_relay_to = max(0.5, _bypass_movetime_ms / 1000.0 + 0.5)
         _phit_trace("cm_bypass_relay_start", to="%.1f" % _bypass_relay_to)
+        _bypass_rem = _ph_recovery_rem_ms(_clock_rem_ms)
         pm, ni = relay_until_bestmove(
             ctx.nnue_1, timeout=_bypass_relay_to,
             intercept_bestmove=True,
             partial_pv_holder=ponderhit_pv_holder,
             go_clock=go_clock,
+            remaining_ms=(max(1, int(_bypass_rem))
+                          if _bypass_rem is not None else None),
         )
         bestmove, ponder = _unpack_bestmove(ni)
         _phit_trace("cm_bypass_relay_end", bm=bestmove or "-")
@@ -23404,6 +23423,7 @@ def _ponderhit_handle_cache_miss(ctx, position_cmd, move_count, ponderhit_pv_hol
     else:
         relay_timeout = max(1.0, eff_s * 1.5) if eff_s else 10.0
     _phit_trace("cm_relay_start", to="%.1f" % relay_timeout)
+    _cm_1st_rem = _ph_recovery_rem_ms(_clock_rem_ms)
 
     _game_phase_value = _calc_game_phase(position_cmd, cfg=ctx.cfg,
                                          child_agreement=ctx.game_progress.last_child_agreement)
@@ -23415,6 +23435,8 @@ def _ponderhit_handle_cache_miss(ctx, position_cmd, move_count, ponderhit_pv_hol
         intercept_bestmove=True,
         partial_pv_holder=ponderhit_pv_holder,
         go_clock=go_clock,
+        remaining_ms=(max(1, int(_cm_1st_rem))
+                      if _cm_1st_rem is not None else None),
         kill_on_empty=False,
         live_info_cb=_ph_miss_live_cb,
     )
@@ -24290,7 +24312,10 @@ def _handle_gameover(ctx, line):
             _flog("[gameover][LOCK-CAP] dl_2_lock still held after stop+3s — "
                   "gameover skip (usinewgame/position 全送で回復)")
     if _endgame_separate and ctx.nnue_2._alive:
-        ctx.nnue_2.send(line)
+        if _ARB1_NNUE2_READY.wait(timeout=3.0):
+            ctx.nnue_2.send(line)
+        else:
+            _flog("[gameover] nnue_2 wake in progress — skip")
     if _eng_alive(ctx.dl_3):
         ctx.dl_3.send(line)
     if _eng_alive(ctx.mate_solver):
@@ -35728,6 +35753,12 @@ class _CsaGame:
                 if self._account_own_echo(csa_move, consumed_s):
                     _flog(f"[CSA] my move echo: {csa_move} "
                           f"remaining={self.my_remaining_ms}ms")
+
+        if not self.gameover:
+            _flog("[CSA] stop_event exit — running cleanup for abandoned game")
+            self._cleanup_search()
+            _dispatch(self.ctx, "gameover draw")
+            self.gameover = True
 
         try:
             self._kifu_write_end()
