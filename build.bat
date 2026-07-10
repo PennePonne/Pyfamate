@@ -26,12 +26,9 @@ if /i "%~1"=="force" (
 )
 
 set FAIL=0
-REM suppress pip's version-check notices
 set PIP_DISABLE_PIP_VERSION_CHECK=1
-REM MSYS2 (if present) is APPENDED to PATH so user-installed tools win.
 if exist "%MSYS%" set "PATH=%PATH%;%MSYS%"
 
-REM --- 1. Cyfamate (C++ amalgamation -> Cyfamate.exe) ---
 echo [1/3] Cyfamate ...
 if exist "%HERE%Cyfamate.exe" (
     echo [SKIP] Cyfamate.exe already exists
@@ -47,12 +44,10 @@ if not defined CXX (
 if not defined CXX (
     where /q g++ 2>nul && set "CXX=g++"
 )
-REM Common MinGW-family install dirs (TDM-GCC, mingw64, w64devkit, scoop)
 if not defined CXX for %%D in ("C:\TDM-GCC-64\bin" "C:\mingw64\bin" "C:\w64devkit\bin" "%USERPROFILE%\scoop\shims") do (
     if not defined CXX if exist "%%~D\clang++.exe" set "CXX=%%~D\clang++.exe"
     if not defined CXX if exist "%%~D\g++.exe" set "CXX=%%~D\g++.exe"
 )
-REM Last resort: install MSYS2 + clang
 if not defined CXX (
     echo   no C++ compiler found. Installing MSYS2 clang as last resort ...
     call :ensure_msys
@@ -82,7 +77,6 @@ if errorlevel 1 (
 echo.
 
 :pyfamate
-REM --- 2. Pyfamate (Python -> pyfamate.exe) ---
 echo [2/3] Pyfamate ...
 if exist "%HERE%pyfamate.exe" (
     echo [SKIP] pyfamate.exe already exists
@@ -92,7 +86,6 @@ if not exist pyfamate.py (
     echo [SKIP] pyfamate.py not found
     goto zyfamate
 )
-REM Find a real Python (validated by running it: rejects the MS Store stub)
 set "PYCMD="
 if defined PYFAMATE_PYTHON if exist "%PYFAMATE_PYTHON%" set "PYCMD=%PYFAMATE_PYTHON%"
 if not defined PYCMD python -c "print(1)" >nul 2>&1 && set "PYCMD=python"
@@ -112,36 +105,11 @@ if not defined PYCMD (
 echo   python: !PYCMD!
 !PYCMD! -m PyInstaller --version >nul 2>&1
 if errorlevel 1 (
-    REM [NO-PIP 2026-07-08] build.bat は pip を一切実行しない (ユーザー方針)。
     echo [ERROR] PyInstaller がありません。手動で導入してから再実行してください:
     echo          !PYCMD! -m pip install pyinstaller
     set FAIL=1
     goto zyfamate
 )
-REM [2026-07-08 NO-PIP / NO-BUNDLE-ORT] build.bat はパッケージを導入も削除も
-REM しない。さらに onnxruntime は exe に *同梱しない* (--exclude-module):
-REM PyInstaller が onnxruntime-gpu の DLL 依存 (cuDNN/cuBLAS 等の CUDA DLL 群)
-REM を追いかけて exe が数百 MB〜GB 級に肥大するため。実行時は本体がシステム
-REM Python の site-packages から解決し、無ければ自動インストールノブ
-REM (PYFAMATE_NO_AUTO_INSTALL) 配下で onnxruntime-gpu を導入する (torch と
-REM 同じ既存機構)。model 推論の EP は既定 CUDA のみ。DML/CPU は実行時の
-REM 明示ノブ (PYFAMATE_SVINFER_DML=1 / PYFAMATE_SVINFER_CPU=1) 専用で、
-REM CUDA 失敗時に黙って落ちるフォールバックではない。CUDA/cuDNN の DLL は
-REM 実行時にマシン内を自動探索する ([CUDA-DLL-HUNT])。
-REM 手順:
-REM   1) model.onnx は learn/teacher の保存時に自動生成される ([AUTO-ONNX]。
-REM      既存 checkpoint からの手動再生成は python pyfamate.py export-onnx)
-REM   2) model 推論の動作確認は必要時のみ手動で: pyfamate.exe check-model
-REM 切り替え:
-REM   set PYFAMATE_TORCH=1  … 旧フル同梱 (torch 込み数 GB 級; 通常不要)
-REM [Linux メモ] 同じ手法がそのまま使える (CUDA EP):
-REM   pip install pyinstaller numpy pillow onnxruntime-gpu   (※手動; build スクリプトは pip しない)
-REM   pyinstaller --onefile --console --clean -n pyfamate \
-REM       --exclude-module torch --exclude-module torchvision --exclude-module torchaudio \
-REM       --exclude-module onnxruntime pyfamate.py
-REM   ./pyfamate check-model   ← EP=CUDAExecutionProvider を確認
-REM 外部依存は fontTools 含め全て非同梱 (exe は stdlib のみ)。必要なものは実行時に
-REM 本体がシステム Python から解決し、無ければ自動インストールする既存機構に一任。
 set "PYI_EXCLUDES=--exclude-module torch --exclude-module torchvision --exclude-module torchaudio --exclude-module onnxruntime --exclude-module numpy --exclude-module PIL --exclude-module Pillow --exclude-module psutil --exclude-module fontTools --exclude-module fonttools"
 if defined PYFAMATE_TORCH (
     echo   [TORCH] 旧フル同梱ビルド ^(torch 込み。サイズ数 GB 級^)
@@ -162,12 +130,10 @@ if errorlevel 1 (
 ) else (
     echo [OK] pyfamate.exe
     for %%F in ("%HERE%pyfamate.exe") do echo   size: %%~zF bytes
-    REM model 推論 (ソース既定 OFF) の確認が要るときだけ手動で: pyfamate.exe check-model
 )
 echo.
 
 :zyfamate
-REM --- 3. Zyfamate (C -> Zyfamate.exe) ---
 echo [3/3] Zyfamate ...
 if exist "%HERE%Zyfamate.exe" (
     echo [SKIP] Zyfamate.exe already exists
@@ -199,9 +165,6 @@ if not defined ZCC (
     )
 )
 echo   compiler: !ZCC!
-REM -O3/-flto. Hash table sizes are auto-detected from physical RAM at runtime
-REM (RAM/16 clamped to 256MB..8GB; override with env var ZYFAMATE_HASH_MB).
-REM To distribute the same exe to other PCs, change -march=native to -march=x86-64-v2.
 "!ZCC!" -O3 -flto -march=native ^
     -static -static-libgcc -Wl,-s -o "%HERE%Zyfamate.exe" "%HERE%Zyfamate.c" -lpthread
 if errorlevel 1 (
@@ -225,7 +188,6 @@ echo  Done: %HERE%
 pause
 exit /b 0
 
-REM ---- subroutine: install MSYS2 only when actually needed ----
 :ensure_msys
 if exist "C:\msys64\usr\bin\pacman.exe" (
     set "PATH=%PATH%;%MSYS%"
