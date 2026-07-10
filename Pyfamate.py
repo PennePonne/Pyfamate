@@ -6190,6 +6190,7 @@ class USIEngine:
         self._dld_logged: set = set()
         self._go_sent: int = 0
         self._bm_seen: int = 0
+        self._bm_arrived: int = 0
         self._last_ack_gen: int | None = None
         self._bm_gen: int | None = None
         self._last_rec: dict | None = None
@@ -6230,6 +6231,7 @@ class USIEngine:
             self._pvmate_last = None
             self._go_sent = 0
             self._bm_seen = 0
+            self._bm_arrived = 0
             self._last_ack_gen = None
             self._bm_gen = None
             self._last_rec = None
@@ -6363,6 +6365,8 @@ class USIEngine:
                               f"info lines (cumulative)")
                     continue
                 q.put(_ln)
+                if _ln.kind == "bestmove" and self.proc is proc:
+                    self._bm_arrived += 1
                 if _ln.kind == "scored" and self._live_info_cb is not None:
                     self._live_scored_latest = _ln
         except (KeyboardInterrupt, SystemExit):
@@ -6417,6 +6421,11 @@ class USIEngine:
 
     def bm_is_current(self):
         return self._bm_seen == self._go_sent
+
+    def search_outstanding(self):
+        if self._go_sent <= 0:
+            return True
+        return self._go_sent > getattr(self, "_bm_arrived", 0)
 
     def classify_bestmove(self):
         if self._bm_gen is None:
@@ -8862,6 +8871,7 @@ class EngineContext:
         "_pvmate_pending",
         "dl_death_marks",
         "_passthru_mode",
+        "shitei_active",
     )
 
     def __init__(self, dl_1, nnue_1, dl_2, nnue_2,
@@ -8919,10 +8929,12 @@ class EngineContext:
         self._pvmate_pending      = None
         self.dl_death_marks       = collections.deque()
         self._passthru_mode       = False
+        self.shitei_active        = False
 
     def reset_game(self):
         self.current_position        = "position startpos"
         self.endgame_mode          = False
+        self.shitei_active         = False
         self.game_log.clear()
         self.game_meta["endgame_triggered"] = False
         self.game_meta["result"]              = "unknown"
@@ -11322,6 +11334,17 @@ def _stop_drain_timeout_safe(ctx, eff_s_hint=None) -> float:
     return min(3.0, max(_ov, _emar))
 
 
+def _ph_recovery_rem_ms(clock_rem_ms):
+    if clock_rem_ms is None:
+        return None
+    try:
+        _t0 = _PHIT_TRACE["t0"]
+        _el_ms = (time.perf_counter() - _t0) * 1000.0 if _t0 else 0.0
+    except Exception:
+        _el_ms = 0.0
+    return max(0.0, float(clock_rem_ms) - _el_ms)
+
+
 def _make_dl1_multipv_cb(ctx, pos):
     try:
         _pb = _board_for_position(pos) if pos else None
@@ -11451,6 +11474,14 @@ def relay_until_bestmove(eng, timeout=120, intercept_bestmove=False,
     _last_hb    = _t_start
     _HB_INTERVAL = 5.0
     _lines_read  = 0
+
+    def _relay_idle_now():
+        _ba = getattr(eng, "_bm_arrived", None)
+        return (_ba is not None
+                and getattr(eng, "_go_sent", 0) > 0
+                and _ba >= eng._go_sent
+                and hasattr(eng, "_q") and eng._q.qsize() == 0)
+    _idle_suspect = _relay_idle_now()
 
     _deadline = time.perf_counter() + timeout
 
@@ -11627,14 +11658,28 @@ def relay_until_bestmove(eng, timeout=120, intercept_bestmove=False,
                 )
             )
             _last_hb = _now
-        _rl_timeout = min(5.0, _remaining)
+        _rl_timeout = min(0.25 if _idle_suspect else 5.0, _remaining)
         out = eng.readline(timeout=_rl_timeout)
         if out is None:
             _flog(f"relay_until_bestmove: {eng.name} readline=None (engine died)" + _ctx())
             nnue_info["score_stale"] = True
             break
         if not out:
+            if _relay_idle_now():
+                if _idle_suspect:
+                    nnue_info["relay_idle_exit"] = True
+                    nnue_info["relay_elapsed_s"] = (
+                        time.perf_counter() - _t_start)
+                    _flog(f"relay_until_bestmove: {eng.name} structurally idle "
+                          f"(go_sent={eng._go_sent} "
+                          f"bm_arrived={getattr(eng, '_bm_arrived', '?')} q=0) "
+                          f"— early exit before cap" + _ctx())
+                    break
+                _idle_suspect = True
+            else:
+                _idle_suspect = False
             continue
+        _idle_suspect = False
         _lines_read += 1
 
         if getattr(out, 'kind', None) == "scored":
@@ -22746,7 +22791,17 @@ def _ponderhit_handle_cache_hit(ctx, position_cmd, move_count, ponderhit_pv_hold
             _pm, _ni = _restart_result
         else:
             ctx.nnue_1.send("stop")
-            relay_until_bestmove(ctx.nnue_1, timeout=_stop_drain_timeout_safe(ctx, locals().get('eff_s')), intercept_bestmove=True,
+            _chi_rec_rem_ms = _ph_recovery_rem_ms(_clock_rem_ms)
+            _chi_drain_to = _stop_drain_timeout_safe(ctx, locals().get('eff_s'))
+            if _chi_rec_rem_ms is not None:
+                _chi_drain_to = min(
+                    _chi_drain_to,
+                    max(0.3, _chi_rec_rem_ms / 1000.0 - _move_overhead_s))
+            relay_until_bestmove(ctx.nnue_1, timeout=_chi_drain_to,
+                                 remaining_ms=(max(1, int(_chi_rec_rem_ms))
+                                               if _chi_rec_rem_ms is not None
+                                               else None),
+                                 intercept_bestmove=True,
                                  kill_on_empty=False)
             _phit_trace("chi_drain")
             if not ctx.nnue_1._alive:
@@ -22771,14 +22826,25 @@ def _ponderhit_handle_cache_hit(ctx, position_cmd, move_count, ponderhit_pv_hold
                                   eff_s=eff_s, cfg=ctx.cfg)
                 ctx.nnue_1.send(position_cmd)
                 _chi_rs_movetime_ms = max(500, int(eff_s * 200))
+                _chi_rec_rem_ms = _ph_recovery_rem_ms(_clock_rem_ms)
+                if _chi_rec_rem_ms is not None:
+                    _chi_rs_movetime_ms = int(_clamp(
+                        _chi_rec_rem_ms - _move_overhead_ms - 300,
+                        300, _chi_rs_movetime_ms))
                 _chi_rs_line = "go movetime %d" % _chi_rs_movetime_ms
                 ctx.nnue_1.send(_chi_rs_line)
                 _chi_rs_timeout = _chi_rs_movetime_ms / 1000.0 + _clamp(eff_s * 0.5, 0.5, 3.0)
+                if _chi_rec_rem_ms is not None:
+                    _chi_rs_timeout = min(
+                        _chi_rs_timeout,
+                        max(0.3, _chi_rec_rem_ms / 1000.0 - _move_overhead_s))
                 _ponderhit_pv = [None]
                 _pm, _ni = relay_until_bestmove(
                     ctx.nnue_1, timeout=_chi_rs_timeout,
                     partial_pv_holder=_ponderhit_pv,
                     go_clock=go_clock,
+                    remaining_ms=(max(1, int(_chi_rec_rem_ms))
+                                  if _chi_rec_rem_ms is not None else None),
                     intercept_bestmove=True,
                     kill_on_empty=False)
                 _phit_trace("chi_research",
@@ -23121,12 +23187,27 @@ def _ponderhit_handle_cache_miss(ctx, position_cmd, move_count, ponderhit_pv_hol
             % _nnue_1_opts.get("Stochastic_Ponder", "?")
         )
         ctx.nnue_1.send("stop")
-        relay_until_bestmove(ctx.nnue_1, timeout=_stop_drain_timeout_safe(ctx, locals().get('eff_s')), intercept_bestmove=True,
+        _rs_rec_rem_ms = _ph_recovery_rem_ms(_clock_rem_ms)
+        _rs_drain_to = _stop_drain_timeout_safe(ctx, locals().get('eff_s'))
+        if _rs_rec_rem_ms is not None:
+            _rs_drain_to = min(
+                _rs_drain_to,
+                max(0.3, _rs_rec_rem_ms / 1000.0 - _move_overhead_s))
+        relay_until_bestmove(ctx.nnue_1, timeout=_rs_drain_to,
+                             remaining_ms=(max(1, int(_rs_rec_rem_ms))
+                                           if _rs_rec_rem_ms is not None
+                                           else None),
+                             intercept_bestmove=True,
                              kill_on_empty=False)
         _phit_trace("cm_drain")
         if not _flush_or_mark_dirty(ctx, "PH-MISS", eff_s):
             return "", None, None
         _rs_movetime_ms = max(500, int(eff_s * 200))
+        _rs_rec_rem_ms = _ph_recovery_rem_ms(_clock_rem_ms)
+        if _rs_rec_rem_ms is not None:
+            _rs_movetime_ms = int(_clamp(
+                _rs_rec_rem_ms - _move_overhead_ms - 300,
+                300, _rs_movetime_ms))
         _rs_line = "go movetime %d" % _rs_movetime_ms
         _apply_slow_mover(
             ctx.nnue_1, _nnue_1_opts,
@@ -23136,10 +23217,16 @@ def _ponderhit_handle_cache_miss(ctx, position_cmd, move_count, ponderhit_pv_hol
         ctx.nnue_1.send(position_cmd)
         ctx.nnue_1.send(_rs_line)
         _rs_timeout = _rs_movetime_ms / 1000.0 + _clamp(eff_s * 0.5, 0.5, 3.0)
+        if _rs_rec_rem_ms is not None:
+            _rs_timeout = min(
+                _rs_timeout,
+                max(0.3, _rs_rec_rem_ms / 1000.0 - _move_overhead_s))
         pm, ni = relay_until_bestmove(
             ctx.nnue_1, timeout=_rs_timeout,
             partial_pv_holder=ponderhit_pv_holder,
             go_clock=go_clock,
+            remaining_ms=(max(1, int(_rs_rec_rem_ms))
+                          if _rs_rec_rem_ms is not None else None),
             intercept_bestmove=True,
             kill_on_empty=False,
         )
@@ -28546,6 +28633,7 @@ class _SpsaUsiEngine:
         self._alive = True
         self._go_sent = 0
         self._bm_seen = 0
+        self._bm_arrived = 0
         self._last_ack_gen = None
         self._bm_gen = None
         self._last_rec = None
@@ -28557,7 +28645,10 @@ class _SpsaUsiEngine:
         def _reader_thread(proc=self.proc, q=self._q):
             try:
                 for line in proc.stdout:
-                    q.put(line.rstrip("\n"))
+                    _rl_line = line.rstrip("\n")
+                    q.put(_rl_line)
+                    if _rl_line.startswith("bestmove") and _self.proc is proc:
+                        _self._bm_arrived += 1
             except (KeyboardInterrupt, SystemExit):
                 raise
             except Exception as _rde:
@@ -28622,6 +28713,7 @@ class _SpsaUsiEngine:
     _note_line    = USIEngine._note_line
     bm_is_current     = USIEngine.bm_is_current
     classify_bestmove = USIEngine.classify_bestmove
+    search_outstanding = USIEngine.search_outstanding
     _force_accept_resync = USIEngine._force_accept_resync
 
     def preserve_wedge_diag(self, tag: str = "WEDGE") -> None:
@@ -29331,6 +29423,15 @@ def _selfplay_game(eng_sente: "_SpsaUsiEngine",
                         _ph_skip_send = True
                         _flog("[P6-1-RACE/FIX-BH] race-caught terminal bestmove — "
                               "child idle, suppressing ponderhit")
+                if (not bestmove and not _ph_skip_send
+                        and getattr(thinker, "_go_sent", 0) > 0
+                        and getattr(thinker, "_bm_arrived", 0)
+                            >= thinker._go_sent):
+                    _ph_skip_send = True
+                    _flog("[P6-1-IDLE/FIX-BH] child answered all gos "
+                          "(go_sent=%d bm_arrived=%d) — ponderhit suppressed "
+                          "(structural idle gate)"
+                          % (thinker._go_sent, thinker._bm_arrived))
                 if not bestmove and not _ph_skip_send:
                     thinker.send(("ponderhit " + _ponderhit_clock) if _ponderhit_clock else "ponderhit")
                 _ponder_hits += 1
@@ -30172,6 +30273,29 @@ def _selfplay_game(eng_sente: "_SpsaUsiEngine",
                 _flog("[SPSA-W][%s] late-adopt vetoed: rec pos_hash=%s != want %s "
                       "for %r — leaving stale (bounded drain/reissue)"
                       % (side, _la_rec.get("pos_hash"), _pos_hash8(pos), bestmove))
+            if (_bm_class != "current"
+                    and bestmove not in ("resign", "win")
+                    and _board is not None
+                    and _bestmove_is_for_board(bestmove, _board)):
+                _ra_rec = getattr(thinker, "_last_rec", None)
+                if (isinstance(_ra_rec, dict)
+                        and _ra_rec.get("pos_hash")
+                        and (_ra_rec.get("council_winner") == bestmove
+                             or _ra_rec.get("bestmove") == bestmove)
+                        and _ra_rec.get("pos_hash") == _pos_hash8(pos)):
+                    _flog("[SPSA-W][%s] [FIX-REC-ADOPT] rec-verified answer "
+                          "adopted (class=%s→current pos_hash=%s bm_gen=%s "
+                          "go_sent=%s): %r"
+                          % (side, _bm_class, _ra_rec.get("pos_hash"),
+                             thinker._bm_gen, thinker._go_sent, bestmove))
+                    with thinker._send_lock:
+                        if thinker._bm_gen is not None:
+                            thinker._go_sent = thinker._bm_gen
+                        else:
+                            thinker._go_sent = thinker._bm_seen
+                        thinker._bm_seen = thinker._go_sent
+                    _wd_reissue_prev_gen = None
+                    _bm_class = "current"
             _ca_rec = getattr(thinker, "_last_rec", None)
             _ca_pos_mismatch = (isinstance(_ca_rec, dict)
                                 and _ca_rec.get("pos_hash")
@@ -31057,6 +31181,7 @@ def _spsa_builtin_worker(
             for _sge in (eng_plus, eng_minus):
                 _sge._go_sent = 0
                 _sge._bm_seen = 0
+                _sge._bm_arrived = 0
                 _sge._last_ack_gen = None
                 _sge._bm_gen = None
                 _sge._last_rec = None
@@ -31122,6 +31247,7 @@ def _spsa_builtin_worker(
                         return
                     _eng._go_sent = 0
                     _eng._bm_seen = 0
+                    _eng._bm_arrived = 0
                     _eng._last_ack_gen = None
                     _eng._bm_gen = None
                     _eng._last_rec = None
