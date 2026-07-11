@@ -1453,6 +1453,10 @@ def _run_pip_logged(cmd, timeout=3600, tag="pip", heartbeat_sec=15):
                     proc.kill()
                 except Exception:
                     pass
+                try:
+                    proc.wait(timeout=5)
+                except Exception:
+                    pass
                 reader_thread.join(timeout=5)
                 _flog(f"[{tag}] 中断 (経過 {now - t0:.0f}s)")
                 return False, tail
@@ -1773,7 +1777,16 @@ def _flip_ensure_installed() -> None:
                       "(新しい端末ウィンドウから)。mac は端末フォントを %s に手動設定。"
                       "反映確認: `flip-font --check`。" % _FLIP_FONT_NAME)
         except Exception as e:
-            _note("スキップ (例外): %r" % e)
+            _emsg = repr(e)
+            _known_quiet = (
+                "glyphDataFormat" in _emsg
+                or "cu2qu" in _emsg
+                or "cubic Bezier" in _emsg
+            )
+            if _known_quiet:
+                _note("[flip-auto] 既知の font 変換制約でスキップ (対局には無影響)")
+            else:
+                _note("スキップ (例外): %r" % e)
 
     threading.Thread(target=_work, daemon=True, name="flip-auto").start()
 
@@ -3262,6 +3275,10 @@ def _hp_run(args, wait_s, capture=False):
             _p.kill()
         except Exception:
             pass
+        try:
+            _p.wait(timeout=3)
+        except Exception:
+            pass
     _hp_out = b""
     if _out_f is not None:
         try:
@@ -3454,7 +3471,7 @@ _CONFIG_DEFAULTS = {
     "DL_1_Engine_Index":              0,
     "DL_2_Engine_Index":              1,
     "DL_3_Engine_Index":              0,
-    "nnue_1_Engine_Index":            0,
+    "nnue_1_Engine_Index":            1,
     "nnue_2_Engine_Index":            1,
     "SPSA_Tune_Pool_Params":          False,
     "IO_Rate_Limit_KBps":             "256",
@@ -3511,7 +3528,7 @@ _CONFIG_DEFAULTS = {
     "Book_Pool_1_BookFile":           "",
     "Book_Pool_1_Label":              "",
     "Book_Sente_Index":               0,
-    "Book_Gote_Index":                0,
+    "Book_Gote_Index":                1,
     "Book_Default_Index":             0,
     "Book_Auto_Turn":                 True,
     "Book_Timeout_Ms":                200,
@@ -3527,11 +3544,19 @@ _CONFIG_DEFAULTS = {
     "Book_Pool_1_DB_SelectMode":     "head",
     "Book_Pool_1_DB_EvalDiff":       0,
     "Book_Pool_1_DB_PlyRange":       "",
+    "Book_Pool_2_BookFile":           "",
+    "Book_Pool_2_Label":              "",
+    "Book_Pool_2_Trust":             _TRUST_ABSOLUTE,
+    "Book_Pool_2_DB_InMemory":       "true",
+    "Book_Pool_2_DB_SelectMode":     "head",
+    "Book_Pool_2_DB_EvalDiff":       0,
+    "Book_Pool_2_DB_PlyRange":       "",
     "Book_Council_Bias_Advisory":     2.6,
     "Book_Council_Bias_Suspect":      1.3,
     "Book2_Fire_On_Consec":           1,
-    "Book2_Pool_Index":               1,
+    "Book2_Pool_Index":               2,
     "Book2_Default_Trust":           _TRUST_ABSOLUTE,
+    "Book2_Enable":                   True,
     "nnue_1_OwnBook":                 False,
     "nnue_1_BookFile":                "no_book",
     "nnue_1_BookDir":                 "",
@@ -3607,9 +3632,9 @@ _CONFIG_DEFAULTS = {
     "GP_Handover_Min":                0.55,
     "GP_Handover_Max":                0.90,
     "GP_Surge_Threshold":             0.0641,
-    "GP_Surge_Eff_S_Boost":           1.3129,
-    "GP_Surge_DL_Weight_Boost":       1.0574,
-    "GP_Surge_DL2_Timeout_Boost":     1.1744,
+    "GP_Surge_Eff_S_Boost":           1.25,
+    "GP_Surge_DL_Weight_Boost":       1.2500,
+    "GP_Surge_DL2_Timeout_Boost":     1.12,
     "GP_Surge_Prospective_Enable":    True,
     "GP_Policy_Enable":               True,
     "GP_Policy_Vote_Weight":          1.02,
@@ -3641,14 +3666,14 @@ _CONFIG_DEFAULTS = {
     "DL_Stability_Threshold_Min":     84,
     "DL_Stability_Threshold_Max":     243,
     "DL_Score_Gap_Min_GP_Coef":       -5.3427,
-    "DL_Time_Ratio":                  0.2586,
+    "DL_Time_Ratio":                  0.24,
     "DL_Min_Remaining_Moves":         8,
     "Rem_Moves_Expected_Game_Ply":    260,
-    "DL_Time_Min_ms":                 1844,
-    "DL_Time_Max_ms":                 39080,
-    "DL_Time_Min_Eff_S_Cap_Ratio":    0.7,
-    "Eff_S_Fischer_Cap_Ratio":        0.3893,
-    "Inc_Spend_Ratio":                0.8244,
+    "DL_Time_Min_ms":                 1200,
+    "DL_Time_Max_ms":                 30000,
+    "DL_Time_Min_Eff_S_Cap_Ratio":    0.55,
+    "Eff_S_Fischer_Cap_Ratio":        0.28,
+    "Inc_Spend_Ratio":                0.72,
     "Fischer_Horizon_Moves":           28,
     "Zero_Main_Fischer_Resume_Inc_Ratio": 8.0,
     "DL_Prefetch_Nodes":              500,
@@ -3659,7 +3684,7 @@ _CONFIG_DEFAULTS = {
     "Multi_Ponder_Enable":            True,
     "SMP_Alt_Min_Gap":               0.0,
     "DL_Ponder_Mode":                 "auto",
-    "DLP_Gain_Min":                   2.0,
+    "DLP_Gain_Min":                   1.2,
     "DLP_Min_Samples":                3,
     "DLP_Ponder_Min_Opp_S":           1.5,
     "POLICY_MOVES":                   9 ,
@@ -3680,10 +3705,10 @@ _CONFIG_DEFAULTS = {
     "Live_Voice_Linger_S":            15.0,
     "Live_Zenrei_Enable":             True,
     "Council_Phase_Enable":            True,
-    "DL1_Council_Weight_Early":        1.691,
-    "DL1_Council_Weight_Late":         0.5786,
-    "DL2_Council_Weight_Early":        1.2402,
-    "DL2_Council_Weight_Late":         0.4207,
+    "DL1_Council_Weight_Early":        1.900,
+    "DL1_Council_Weight_Late":         0.8200,
+    "DL2_Council_Weight_Early":        1.5000,
+    "DL2_Council_Weight_Late":         0.6500,
     "DL1_Council_Depth_Trust_Base":      0.4434,
     "DL1_Council_Depth_Trust_Per_Depth": 0.0529,
     "DL1_Council_Depth_Trust_Min":       0.5529,
@@ -3706,18 +3731,18 @@ _CONFIG_DEFAULTS = {
     "Prefetch_Budget_Safety_Ratio": 0.8,
     "Root_Park_VOI_Scale":          0.5,
     "Voi_Norm_Cp":                  600,
-    "Time_Aggression":                 0.7601,
+    "Time_Aggression":                 0.70,
     "Time_Aggression_DL":              -1,
     "Time_Aggression_NNUE":            -1,
     "Time_Aggression_Rescue":          -1,
     "TA_Lerp_SlowMover_Lo":            100.0,
     "TA_Lerp_SlowMover_Hi":            200.0,
     "TA_Lerp_DL_Ratio_Lo":             0.06,
-    "TA_Lerp_DL_Ratio_Hi":             0.25,
+    "TA_Lerp_DL_Ratio_Hi":             0.20,
     "TA_Lerp_DL_Max_Ms_Lo":            12000.0,
-    "TA_Lerp_DL_Max_Ms_Hi":            40000.0,
+    "TA_Lerp_DL_Max_Ms_Hi":            28000.0,
     "Time_Margin_K":                   0.9018,
-    "Time_Margin_Floor":               0.6159,
+    "Time_Margin_Floor":               0.58,
     "Time_GP_Lo":                      0.8512,
     "Time_GP_Hi":                      1.0232,
     "Time_GP_Gamma":                   2.0,
@@ -3727,7 +3752,7 @@ _CONFIG_DEFAULTS = {
     "Time_Fall_Gain":                  0.05,
     "Time_Fall_Floor":                 0.572,
     "Time_Fall_Ceil":                  1.708,
-    "Time_Stable_Reduction_Min":       0.85,
+    "Time_Stable_Reduction_Min":       0.80,
     "Time_Stable_Streak_Min":          3,
     "Time_Ponder_Bonus":               1.0,
     "Time_Trivial_Cap":                0.2,
@@ -3748,7 +3773,7 @@ _CONFIG_DEFAULTS = {
     "Consensus_Skip_Nyugyoku_Disable": True,
     "Council_Nyugyoku_DL_Restore":     1.0,
     "MaxMin_Tie_Margin":               0.05,
-    "Move_Overhead_Ms":                200,
+    "Move_Overhead_Ms":                400,
     "Council_Score_Discount_Threshold": 184,
     "Council_Score_Discount_Scale":     660,
     "Council_Score_Discount_Min":       0.293,
@@ -3773,8 +3798,8 @@ _CONFIG_DEFAULTS = {
     "PV_Mate_DL3_Timeout_Ms":           463,
     "PV_Mate_Override_Max_Step":        4,
     "Council_Override_Min_Diff_cp":    50,
-    "Council_Weight_Floor_Early":      0.30,
-    "Council_Weight_Floor_Late":       0.15,
+    "Council_Weight_Floor_Early":      0.45,
+    "Council_Weight_Floor_Late":       0.25,
     "DL_Conviction_Score_Threshold_cp":     1959,
     "DL_Conviction_Score_Gap_cp":           538,
     "DL_Conviction_Council_Wait_Ms":        3000,
@@ -3788,7 +3813,7 @@ _CONFIG_DEFAULTS = {
     "Mate_Solver_Movetime_Min_Ms":    300,
     "Mate_Solver_Movetime_Max_Ms":    8000,
     "Tonshi_Guard_Kp_Threshold":      4,
-    "Tonshi_Guard_Min_Eff_S":         1.0,
+    "Tonshi_Guard_Min_Eff_S":         0.8,
     "Tonshi_Guard_Movetime_Max_S":    1.0,
     "Mate_Solver_Parallel_Movetime":  1,
     "Mate_Solver_Council":            1,
@@ -3803,19 +3828,19 @@ _CONFIG_DEFAULTS = {
     "DL_3_Stochastic_Ponder":         "true",
     "DL_3_Nodes":                     300,
     "Light_Council_Enable":           True,
-    "Light_Council_Max_Eff_S":        3.2674,
+    "Light_Council_Max_Eff_S":        2.8,
     "Light_Council_Min_Eff_S":        0.5,
     "Light_Council_DL3_Timeout_Ms":   400,
     "Light_Council_DL3_Timeout_Per_S": 190,
-    "Light_Council_DL3_Weight":       0.7791,
-    "Endgame_Min_Eff_S":            1.5,
+    "Light_Council_DL3_Weight":       1.0500,
+    "Endgame_Min_Eff_S":            1.3,
     "Endgame_Min_Eff_S_Resume_Ratio": 2.0,
     "DL_Time_Ratio_Eff_S_Coef":       -0.0049,
     "POLICY_NODES_Per_Eff_S":          495,
-    "SlowMover_Base":                  97,
-    "SlowMover_Per_Sec":               7.2291,
-    "SlowMover_Min":                   90   ,
-    "SlowMover_Max":                   195   ,
+    "SlowMover_Base":                  90,
+    "SlowMover_Per_Sec":               6.5,
+    "SlowMover_Min":                   85   ,
+    "SlowMover_Max":                   170   ,
     "Council_Corr_Dampen":            0.0,
     "Council_Corr_WR_Scale":          0.25,
     "DL3_Proxy_Enable":                True,
@@ -3851,14 +3876,14 @@ _CONFIG_DEFAULTS = {
     "DL_Gap_Lift_Score_Min":   1452,
     "DL_Gap_Lift_Spread_Max":  53,
 
-    "Disagree_Eff_S_Boost_Score1":     1.2289,
-    "Disagree_Eff_S_Boost_Score2":     1.3179,
+    "Disagree_Eff_S_Boost_Score1":     1.18,
+    "Disagree_Eff_S_Boost_Score2":     1.28,
     "Disagree_Score_Gap_Threshold_Cp": 76 ,
     "Disagree_Emergency_Gp_Min":       0.75,
     "Disagree_Emergency_Score_Gap_Cp": 300,
     "Disagree_Emergency_Eff_S_Boost":  3.0,
     "Disagree_Emergency_Dl2_Cap":      4.0,
-    "ARB_Enable":                      True,
+    "ARB_Enable":                      False,
     "ARB_Movetime_Min_Ms":             200,
     "ARB_Movetime_Max_Ms":             1500,
     "ARB_Budget_Ratio":                0.25,
@@ -3868,7 +3893,7 @@ _CONFIG_DEFAULTS = {
     "ARB1_Prestart_Timeout_S":         6.0,
     "ARB1_NNUE1_Burst_Threads":        1,
     "Resource_RAM_Use_Available":      True,
-    "nnue_Hash_Cap_MB":               262144,
+    "nnue_Hash_Cap_MB":               131072,
     "Adjudicate_Min_Ply":             30,
     "Resource_RAM_Safety_Margin_MB":   6144,
     "Resource_RAM_Budget_Pct":         1.0,
@@ -3890,7 +3915,7 @@ _CONFIG_DEFAULTS = {
     "Revive_Cooldown_S":               45.0,
     "ARB1_NNUE2_Hash":                 1024,
     "Score_Stability_Swing_Threshold_Cp": 67,
-    "Score_Stability_Eff_S_Boost":        1.31,
+    "Score_Stability_Eff_S_Boost":        1.25,
     "Score_Stability_GP_Scale_Min":       0.4481,
     "Score_Stability_GP_Scale_Max":       0.9889,
 }
@@ -4514,9 +4539,6 @@ _RESOURCE_THREADS_SPARE_MIN = _cint(
     _cfg, "Resource_Threads_Spare_Min",
     _spare_cores_plan_core(os.cpu_count() or 4))
 _RESOURCE_RAM_SAFETY_MARGIN_MB = _cint(_cfg, "Resource_RAM_Safety_Margin_MB", 4096)
-_HASH_ABS_CAP_MB = _cint(_cfg, "nnue_Hash_Cap_MB", 262144, lo=64)
-_ADJ_MIN_PLY = _cint(_cfg, "Adjudicate_Min_Ply", 30, lo=0)
-
 def _sys_total_ram_mb():
     try:
         return int(os.sysconf("SC_PAGE_SIZE") * os.sysconf("SC_PHYS_PAGES")
@@ -4527,11 +4549,22 @@ def _sys_total_ram_mb():
 
 _BIG_RAM_CORES_MIN = 64
 _big_ram_cores_ok = (os.cpu_count() or 0) >= _BIG_RAM_CORES_MIN
+_SYS_TOTAL_RAM_MB = _sys_total_ram_mb()
+
+_HASH_ABS_CAP_MB = _cint(_cfg, "nnue_Hash_Cap_MB", 131072, lo=64)
+if (_big_ram_cores_ok
+        and _HASH_ABS_CAP_MB < 131072
+        and _SYS_TOTAL_RAM_MB >= 256 * 1024):
+    _HASH_ABS_CAP_MB = 131072
+    _flog(f"[BIG-RAM-CAP] nnue_Hash_Cap_MB 自動引き上げ→{_HASH_ABS_CAP_MB} "
+          f"(total_ram={_SYS_TOTAL_RAM_MB}MB)")
+_ADJ_MIN_PLY = _cint(_cfg, "Adjudicate_Min_Ply", 30, lo=0)
+
 
 _hash_static_cfg = str(_cfg.get("nnue_Hash_Static", "auto")).strip().lower()
 if _hash_static_cfg in ("auto", ""):
     _HASH_STATIC_ENABLED = (_big_ram_cores_ok
-                            and _sys_total_ram_mb() >= 2 * _HASH_ABS_CAP_MB)
+                            and _SYS_TOTAL_RAM_MB >= 2 * _HASH_ABS_CAP_MB)
 else:
     _HASH_STATIC_ENABLED = _hash_static_cfg in ("true", "1", "yes", "on")
 
@@ -5323,6 +5356,12 @@ if not _MP_LIGHT_IMPORT:
         _rb_total_mb, _rb_avail_mb, _resource_ram_pct,
         _cfg_bool("Resource_RAM_Use_Available", True) and not _tuning_mode,
         _RESOURCE_RAM_SAFETY_MARGIN_MB)
+    if (_tuning_mode and not _tuning_is_solo
+            and _tuning_worker_count > 1 and _rb_basis_mb is not None):
+        _rb_basis_old = _rb_basis_mb
+        _rb_basis_mb = _rb_basis_mb // _tuning_worker_count
+        _flog(f"[BUDGET×SPSA] RAM basis {_rb_basis_old}→{_rb_basis_mb}MB "
+              f"(÷{_tuning_worker_count} workers)")
     _rb_cores    = _effective_cores()
     _rb_arb_reserve = (_cint(_cfg, "ARB1_NNUE2_Hash", 1024)
                        if (_cfg_bool("ARB_Enable", True)
@@ -5536,7 +5575,8 @@ if not _MP_LIGHT_IMPORT:
         _flog(f"[DL-SCALE] 適用失敗 ({type(_dse).__name__}: {_dse}) — 据え置き")
     try:
         _spare_min = _RESOURCE_THREADS_SPARE_MIN
-        _nnue_cap = max(1, _rb_cores - _spare_min)
+        _nnue_raw = max(1, _rb_cores - _spare_min)
+        _nnue_cap = min(120, _nnue_raw) if _rb_cores >= 64 else _nnue_raw
         _nnue_cur = _cint(_cfg, "nnue_1_Threads", 4)
         if _nnue_thr_managed and _nnue_cur != _nnue_cap:
             _cfg["nnue_1_Threads"] = str(_nnue_cap)
@@ -5587,6 +5627,9 @@ def _build_dl_opts(slot_prefix, ponder_opts, mcts_opts=None, *,
         "PV_Mate_Search_Threads": pv_mate_threads if pv_mate_threads is not None else str(_cfg.get(f"{slot_prefix}_PV_Mate_Search_Threads", "0")),
         "MultiPV":                multipv if multipv is not None else "1",
     }
+    opts["USI_OwnBook"] = "false"
+    opts["BookFile"]    = "no_book"
+    opts["BookDir"]     = "book"
     _is_bat = engine_path.lower().endswith(".bat")
     _cfg_max_gpu = str(_cfg.get(f"{slot_prefix}_Max_GPU", "")).strip()
     _cfg_disabled_gpu = str(_cfg.get(f"{slot_prefix}_Disabled_GPU", "")).strip()
@@ -5594,7 +5637,7 @@ def _build_dl_opts(slot_prefix, ponder_opts, mcts_opts=None, *,
         opts["Max_GPU"] = _cfg_max_gpu
     if _is_bat and _cfg_disabled_gpu:
         opts["Disabled_GPU"] = _cfg_disabled_gpu
-    if _is_bat and _cfg_max_gpu:
+    if _cfg_max_gpu:
         _ngpu = _clamp(int(_cfg_max_gpu), 1, 16)
     else:
         _ngpu = _sys_gpu_count()
@@ -5671,6 +5714,7 @@ _book_spsa_disabled = (bool(_SPSA_MODE)
     or (len(sys.argv) > 1 and sys.argv[1] in _SELFPLAY_COMMANDS))
 _book_enabled       = (bool(_book_pool_indices) and not _book_spsa_disabled
                         and (bool(_book_path) or _book_pool_all_sbk))
+_book_enabled_init  = _book_enabled
 if _book_spsa_disabled and (_book_path or _book_pool_all_sbk):
     _flog("[bookloader] 自己対局モード検出 — Book を無効化 (定跡なしで対局)。")
 
@@ -5826,7 +5870,7 @@ class _TimeDynGlobals:
 
 _time_dyn = _TimeDynGlobals()
 
-_time_dyn.time_aggression = _cfloat(_cfg, "Time_Aggression", 0.7601, 0.0, _TA_CEIL)
+_time_dyn.time_aggression = _cfloat(_cfg, "Time_Aggression", 0.70, 0.0, _TA_CEIL)
 _time_aggression_base = _time_dyn.time_aggression
 
 def _resolve_ta(key: str, base: float) -> float:
@@ -6141,10 +6185,10 @@ _time_dyn.dl_time_ratio, _dl_time_ratio_user_set = _resolve_auto_managed(
     check_fn=lambda v: _could_be_auto_lerp(v, *_LERP_DL_RATIO))
 _dl_min_remaining_moves   = _cint(_cfg, "DL_Min_Remaining_Moves", 8, 1)
 _rem_moves_expected_game_ply = _cint(_cfg, "Rem_Moves_Expected_Game_Ply", 260, lo=100, hi=512)
-_dl_time_min_ms      = _cfloat(_cfg, "DL_Time_Min_ms", 1844.0, 0.0)
-_eff_s_fischer_cap_ratio = _cfloat(_cfg, "Eff_S_Fischer_Cap_Ratio", 0.3893, lo=0.0)
+_dl_time_min_ms      = _cfloat(_cfg, "DL_Time_Min_ms", 1400.0, 0.0)
+_eff_s_fischer_cap_ratio = _cfloat(_cfg, "Eff_S_Fischer_Cap_Ratio", 0.28, lo=0.0)
 _dl_time_min_eff_s_cap_ratio = _cfloat(_cfg, "DL_Time_Min_Eff_S_Cap_Ratio", 0.7, lo=0.0)
-_inc_spend_ratio = _cfloat(_cfg, "Inc_Spend_Ratio", 0.8244, lo=0.1, hi=1.0)
+_inc_spend_ratio = _cfloat(_cfg, "Inc_Spend_Ratio", 0.72, lo=0.1, hi=1.0)
 _fischer_horizon_moves = _cint(_cfg, "Fischer_Horizon_Moves", 28, lo=0)
 _dl_time_ratio_eff_s_coef = _cfloat(_cfg, "DL_Time_Ratio_Eff_S_Coef", -0.0049)
 _dl_time_max_ms_auto = _lerp(*_LERP_DL_MAX_MS, _time_aggression_dl)
@@ -6343,7 +6387,7 @@ _dl_prefetch_idp_nodes = (
     or _params["POLICY_NODES"]
 )
 
-_move_overhead_ms = _cint(_cfg, "Move_Overhead_Ms", 200, 0)
+_move_overhead_ms = _cint(_cfg, "Move_Overhead_Ms", 400, 0)
 _move_overhead_s = max(0.05, _move_overhead_ms / 1000.0)
 
 _SETOPTION_INT_SPIN = {
@@ -6848,6 +6892,15 @@ class USIEngine:
                       f"during drain (line {_drained_count}) — stop-flush 経由"
                       f"では ponder/停止応答の正常な読み捨て (取り逃しではない)"
                       f": {line[:80]}")
+            if "Illegal Input Move" in line:
+                try:
+                    _bad = line.split("Illegal Input Move")[-1].split(":")[-1].strip().split()[0]
+                except Exception:
+                    _bad = "?"
+                _flog(f"[{self.name}] ILLEGAL-INPUT detected during drain: "
+                      f"child rejected move {_bad!r} — orchestrator/child board "
+                      f"desync suspected; forcing full position resync on next go")
+                self._force_position_resync = True
             _drained_count += 1
             _drained_tail.append(line)
             if len(_drained_tail) > 8:
@@ -6957,6 +7010,11 @@ class USIEngine:
                 if _mb:
                     _numbered_gpu_max = max(_numbered_gpu_max, int(_mb.group(1)))
         _drop_numbered = set()
+        if _numbered_gpu_max >= 2 and "Max_GPU" in options:
+            try:
+                _numbered_gpu_max = min(_numbered_gpu_max, int(options["Max_GPU"]))
+            except (TypeError, ValueError):
+                pass
         if _is_numberless and _numbered_gpu_max >= 2:
             for _gi in range(2, _numbered_gpu_max + 1):
                 for _base in ("DNN_Model", "DNN_Batch_Size", "UCT_Threads"):
@@ -7435,7 +7493,7 @@ class EngineConfig:
     game_phase_policy_vote_weight:            float = 1.02
     game_phase_policy_urgent_vote_weight:     float = 1.08
     game_phase_policy_draw_ply_urgent_margin: int   = 30
-    endgame_min_eff_s:              float = 1.5
+    endgame_min_eff_s:              float = 1.3
     endgame_min_eff_s_resume_ratio: float = 2.0
     gpu_ponder_nodes_max:             int   = 200000
     dl2_sp_configured:                str   = "true"
@@ -7498,14 +7556,14 @@ class EngineConfig:
     sennichite_reject_gote: bool  = False
     sennichite_reject_sente: bool  = False
     sp_min_eff_s: float = 0.0
-    time_aggression_margin_floor: float = 0.6159
+    time_aggression_margin_floor: float = 0.58
     time_aggression_margin_k: float = 0.9018
     zmf_resume_inc_ratio: float = 8.0
     book_default_index: int   = 0
     book_gote_index: int   = 0
     book_sente_index: int   = 0
     dl_1_model_default: str   = 'eval/model.onnx'
-    dl_time_min_ms: float = 1844.0
+    dl_time_min_ms: float = 1400.0
     time_aggression_game_phase_gamma: float = 2.0
     time_aggression_game_phase_hi: float = 1.0232
     time_aggression_game_phase_lo: float = 0.8512
@@ -7545,12 +7603,13 @@ class EngineConfig:
     mate_solver_council: bool = True
     mate_solver_min_game_phase: float = 0.0
     tonshi_guard_kp_threshold: int = 4
-    tonshi_guard_min_eff_s: float = 1.0
+    tonshi_guard_min_eff_s: float = 0.8
     tonshi_guard_movetime_max_s: float = 1.0
     mate_solver_min_ply: int   = 0
+    book2_enable: bool = False
     book2_fire_consec: int   = 1
     book2_default_trust: str   = _TRUST_ADVISORY
-    book2_pool_index: int   = 1
+    book2_pool_index: int   = 2
     book_council_bias_advisory: float = 2.6
     book_council_bias_suspect: float = 1.3
     book_timeout_ms: int   = 200
@@ -7603,7 +7662,7 @@ class EngineConfig:
     log_engine_stderr: bool = False
     log_stats:         bool = True
 
-    time_aggression_base:        float = 0.7601
+    time_aggression_base:        float = 0.70
     dl_time_ratio_user_set:      bool  = False
     dl_time_max_ms_user_set:     bool  = False
     dl_2_margin_min_user_set:    bool  = False
@@ -7686,10 +7745,10 @@ class EngineConfig:
             council_override_min_diff_cp = int(cfg.get("Council_Override_Min_Diff_cp", 50)),
             council_weight_floor_early = _cfloat(cfg, "Council_Weight_Floor_Early", 0.30, 0.0, 1.0),
             council_weight_floor_late  = _cfloat(cfg, "Council_Weight_Floor_Late", 0.15, 0.0, 1.0),
-            slow_mover_base    = float(cfg.get("SlowMover_Base",    97)),
-            slow_mover_per_sec = float(cfg.get("SlowMover_Per_Sec", 7.2291)),
-            slow_mover_min     = float(cfg.get("SlowMover_Min",     90)),
-            slow_mover_max     = float(cfg.get("SlowMover_Max",     195)),
+            slow_mover_base    = float(cfg.get("SlowMover_Base",    90)),
+            slow_mover_per_sec = float(cfg.get("SlowMover_Per_Sec", 6.5)),
+            slow_mover_min     = float(cfg.get("SlowMover_Min",     85)),
+            slow_mover_max     = float(cfg.get("SlowMover_Max",     170)),
             dl_2_margin_ratio     = float(cfg.get("DL_2_Time_Margin_Ratio",  0.4971)),
             dl_2_margin_max_ms    = float(cfg.get("DL_2_Time_Margin_Max_ms", 27740)),
             dl_2_latency_per_mb_s = _cfloat(cfg, "DL_2_Latency_Per_MB_s", 0.005, lo=0.0),
@@ -7697,8 +7756,8 @@ class EngineConfig:
             dl_2_latency_autocal_min_samples = _cint(cfg, "DL_2_Latency_Autocal_Min_Samples", 5, lo=1),
             dl_2_cold_launch_latency_factor = _cfloat(cfg, "DL_2_Cold_Launch_Latency_Factor", 1.1032, lo=1.0),
             dl_2_wall_clock_factor = _cfloat(cfg, "DL_2_Wall_Clock_Factor", 1.0, lo=0.1),
-            disagree_eff_s_boost_score1       = _cfloat(cfg, "Disagree_Eff_S_Boost_Score1", 1.2289, lo=1.0),
-            disagree_eff_s_boost_score2       = _cfloat(cfg, "Disagree_Eff_S_Boost_Score2", 1.3179, lo=1.0),
+            disagree_eff_s_boost_score1       = _cfloat(cfg, "Disagree_Eff_S_Boost_Score1", 1.18, lo=1.0),
+            disagree_eff_s_boost_score2       = _cfloat(cfg, "Disagree_Eff_S_Boost_Score2", 1.28, lo=1.0),
             disagree_score_gap_threshold_cp   = _cint(cfg, "Disagree_Score_Gap_Threshold_Cp", 76, lo=0),
             disagree_emergency_game_phase_min         = _cfloat(cfg, "Disagree_Emergency_Gp_Min", 0.75, 0.0, 1.5),
             disagree_emergency_score_gap_cp   = _cint(cfg, "Disagree_Emergency_Score_Gap_Cp", 300, lo=0),
@@ -7727,7 +7786,7 @@ class EngineConfig:
             game_phase_policy_vote_weight             = _cfloat(cfg, "GP_Policy_Vote_Weight", 1.02, 1.0, 1.10),
             game_phase_policy_urgent_vote_weight      = _cfloat(cfg, "GP_Policy_Urgent_Vote_Weight", 1.08, 1.0, 1.25),
             game_phase_policy_draw_ply_urgent_margin  = _cint(cfg, "GP_Policy_Draw_Ply_Urgent_Margin", 30, lo=0),
-            endgame_min_eff_s               = _endgame_min_eff_s_sanitize(cfg.get("Endgame_Min_Eff_S", 1.5)),
+            endgame_min_eff_s               = _endgame_min_eff_s_sanitize(cfg.get("Endgame_Min_Eff_S", 1.3)),
             endgame_min_eff_s_resume_ratio  = float(cfg.get("Endgame_Min_Eff_S_Resume_Ratio", 2.0)),
             gpu_ponder_nodes_max              = max(_cint(cfg, "DL_Prefetch_Nodes", 500, lo=1),
                                                     int(cfg.get("GPU_Ponder_Nodes_Max", 200000))),
@@ -7787,7 +7846,7 @@ class EngineConfig:
             sennichite_reject_gote = _dict_bool(cfg, "Sennichite_Reject_Gote", False),
             sennichite_reject_sente = _dict_bool(cfg, "Sennichite_Reject_Sente", False),
             sp_min_eff_s = float(cfg.get("Stochastic_Ponder_Min_Eff_S", 0.0)),
-            time_aggression_margin_floor = _cfloat(cfg, "Time_Margin_Floor", 0.6159, 0.05, 1.0),
+            time_aggression_margin_floor = _cfloat(cfg, "Time_Margin_Floor", 0.58, 0.05, 1.0),
             time_aggression_margin_k = _cfloat(cfg, "Time_Margin_K", 0.9018, lo=0.0),
             zmf_resume_inc_ratio = float(cfg.get("Zero_Main_Fischer_Resume_Inc_Ratio", 8.0)),
             book_default_index = int(cfg.get("Book_Default_Index", _CONFIG_DEFAULTS["Book_Default_Index"])),
@@ -7828,7 +7887,7 @@ class EngineConfig:
             mate_solver_join_timeout_s = ( int(cfg["mate_solver_Join_Timeout_Ms"]) / 1000.0 ),
             mate_solver_min_game_phase = _cfloat(cfg, "Mate_Solver_Min_GP", 0.75, lo=0.0),
             tonshi_guard_kp_threshold = _cint(cfg, "Tonshi_Guard_Kp_Threshold", 4, 0, 9),
-            tonshi_guard_min_eff_s = _cfloat(cfg, "Tonshi_Guard_Min_Eff_S", 1.0, lo=0.0),
+            tonshi_guard_min_eff_s = _cfloat(cfg, "Tonshi_Guard_Min_Eff_S", 0.8, lo=0.0),
             tonshi_guard_movetime_max_s = _cfloat(cfg, "Tonshi_Guard_Movetime_Max_S", 1.0, lo=0.05),
             mate_solver_min_eff_s = _cfloat(cfg, "Mate_Solver_Min_Eff_S", 1.5, lo=0.0),
             mate_solver_movetime_ratio = _cfloat(cfg, "Mate_Solver_Movetime_Ratio", 0.85, lo=0.0),
@@ -7837,9 +7896,10 @@ class EngineConfig:
             mate_solver_parallel_movetime = _dict_bool(cfg, "Mate_Solver_Parallel_Movetime", True),
             mate_solver_council = _dict_bool(cfg, "Mate_Solver_Council", True),
             mate_solver_min_ply = int(cfg["Mate_Solver_Min_Ply"]),
+            book2_enable = _dict_bool(cfg, "Book2_Enable", False),
             book2_fire_consec = _cint(cfg, "Book2_Fire_On_Consec", 1, lo=1),
             book2_default_trust = _norm_str(cfg.get("Book2_Default_Trust", _TRUST_ADVISORY)),
-            book2_pool_index = int(cfg.get("Book2_Pool_Index", 1)),
+            book2_pool_index = int(cfg.get("Book2_Pool_Index", 2)),
             book_council_bias_advisory = _cfloat(cfg, "Book_Council_Bias_Advisory", 2.6, lo=0.0),
             book_council_bias_suspect = _cfloat(cfg, "Book_Council_Bias_Suspect", 1.3, lo=0.0),
             book_timeout_ms = _cint(cfg, "Book_Timeout_Ms", _CONFIG_DEFAULTS["Book_Timeout_Ms"], lo=1),
@@ -7847,13 +7907,13 @@ class EngineConfig:
             book_consec_max = _cint(cfg, "Book_Consec", _CONFIG_DEFAULTS["Book_Consec"], lo=1),
             book_hard_kill_consec = _cint(cfg, "Book_Hard_Kill_Consec", _CONFIG_DEFAULTS.get("Book_Hard_Kill_Consec", 0), lo=0),
             score_stability_swing_threshold_cp = _cint(cfg, "Score_Stability_Swing_Threshold_Cp", 67, lo=0),
-            score_stability_eff_s_boost       = _cfloat(cfg, "Score_Stability_Eff_S_Boost", 1.31, lo=1.0),
+            score_stability_eff_s_boost       = _cfloat(cfg, "Score_Stability_Eff_S_Boost", 1.25, lo=1.0),
             score_stability_game_phase_scale_min      = _cfloat(cfg, "Score_Stability_GP_Scale_Min", 0.4481, 0.0, 1.0),
             score_stability_game_phase_scale_max      = _cfloat(cfg, "Score_Stability_GP_Scale_Max", 0.9889, 0.0, 2.0),
             game_phase_surge_threshold        = _cfloat(cfg, "GP_Surge_Threshold", 0.0641, lo=0.0),
-            game_phase_surge_eff_s_boost      = _cfloat(cfg, "GP_Surge_Eff_S_Boost", 1.3129, lo=1.0),
+            game_phase_surge_eff_s_boost      = _cfloat(cfg, "GP_Surge_Eff_S_Boost", 1.25, lo=1.0),
             game_phase_surge_dl_weight_boost  = _cfloat(cfg, "GP_Surge_DL_Weight_Boost", 1.0574, lo=1.0),
-            game_phase_surge_dl2_timeout_boost = _cfloat(cfg, "GP_Surge_DL2_Timeout_Boost", 1.1744, lo=1.0),
+            game_phase_surge_dl2_timeout_boost = _cfloat(cfg, "GP_Surge_DL2_Timeout_Boost", 1.12, lo=1.0),
             dl3_proxy_mode        = _dl3_mode_n,
             dl3_proxy_fuse_alpha  = _cfloat(cfg, "DL3_Proxy_Fuse_Alpha", 0.3718, 0.0, 1.0),
             dl3_proxy_weight_min  = _dl3_wmin_n,
@@ -7894,7 +7954,7 @@ class EngineConfig:
             game_phase_child_pull = _cfloat(cfg, "GP_Child_Pull", 0.0, lo=0.0),
             log_engine_stderr = _dict_bool(cfg, "Log_Engine_Stderr", False),
             log_stats         = _dict_bool(cfg, "Log_Stats", True),
-            time_aggression_base = _cfloat(cfg, "Time_Aggression", 0.7601, 0.0, _TA_CEIL),
+            time_aggression_base = _cfloat(cfg, "Time_Aggression", 0.70, 0.0, _TA_CEIL),
             policy_nodes_per_eff_s = float(cfg.get("POLICY_NODES_Per_Eff_S", 495)),
             dl_min_remaining_moves = _cint(cfg, "DL_Min_Remaining_Moves", 8, lo=1),
             rem_moves_expected_game_ply = _cint(cfg, "Rem_Moves_Expected_Game_Ply", 260, 100, 512),
@@ -8379,6 +8439,11 @@ def _book_apply_file(ctx, which: str, idx: int, book_file: str, *, send_isready:
     st = ctx.book_state if which == "book" else ctx.book2_state
     log_tag = "[bookloader]" if which == "book" else "[bookloader2]"
 
+    try:
+        _book_preload_ondemand_retry(ctx, idx)
+    except Exception as _re:
+        _flog(f"{log_tag} オンデマンド再試行 helper 例外 (無視): {_re}")
+
     st.index = idx
     st.book_file = book_file
     st.label = _book_pool_label(idx)
@@ -8468,6 +8533,7 @@ class _BookState:
     db_pool_index: int = -1
     firing:      bool = False
     exhausted:   bool = False
+    preload_failed: object = None
 
     def reset(self):
         self.consec      = 0
@@ -8578,11 +8644,79 @@ def _book_start_engine(ctx) -> bool:
 
     ctx.book = _NullBookEngine()
     ctx.book_state.active = True
-    _flog(f"[bookloader] 起動成功 (辞書ロードは usinewgame まで遅延) "
+    _flog(f"[bookloader] 全プール一括プリロード開始 pool_indices={_book_pool_indices}")
+    _preload_failed = set()
+    _RETRY_ATTEMPTS = 3
+    _RETRY_SLEEP_S  = 0.15
+    for _pi in _book_pool_indices:
+        _pf = _book_resolve_file(_pi)
+        if not _pf:
+            continue
+        _last_err = None
+        _ok = False
+        for _attempt in range(_RETRY_ATTEMPTS):
+            try:
+                if _book_file_is_sbk(_pf):
+                    _sbk_load_book(_pf)
+                elif _book_file_is_dbybb(_pf) and _book_pool_db_inmemory(_pi):
+                    _db_load_book(_pf)
+                _ok = True
+                if _attempt == 0:
+                    _flog(f"[bookloader] プリロード完了 pool={_pi} book_file={_pf!r}")
+                else:
+                    _flog(f"[bookloader] プリロード完了 pool={_pi} book_file={_pf!r}"
+                          f" (再試行 {_attempt+1}/{_RETRY_ATTEMPTS} で成功)")
+                break
+            except Exception as _pe:
+                _last_err = _pe
+                if _attempt + 1 < _RETRY_ATTEMPTS:
+                    _flog(f"[bookloader] プリロード失敗 pool={_pi} book_file={_pf!r}"
+                          f" attempt={_attempt+1}/{_RETRY_ATTEMPTS}: {_pe} — 再試行")
+                    try:
+                        time.sleep(_RETRY_SLEEP_S)
+                    except Exception:
+                        pass
+        if not _ok:
+            _preload_failed.add(_pi)
+            _flog(f"[bookloader][CRITICAL] プリロード最終失敗 pool={_pi} "
+                  f"book_file={_pf!r} last_err={_last_err!r} — "
+                  f"オンデマンド再試行対象に登録")
+    ctx.book_state.preload_failed = _preload_failed if _preload_failed else None
+    _flog(f"[bookloader] 起動成功 (全プールプリロード済み) "
           f"pool_indices={_book_pool_indices} "
           f"default_index={_idx} book_file={_bf!r} label={ctx.book_state.label!r} "
-          f"trust={ctx.book_state.trust!r}")
+          f"trust={ctx.book_state.trust!r}"
+          + (f" preload_failed={sorted(_preload_failed)}" if _preload_failed else ""))
     return True
+
+
+def _book_preload_ondemand_retry(ctx, idx: int) -> bool:
+    st = getattr(ctx, "book_state", None)
+    failed = getattr(st, "preload_failed", None) if st is not None else None
+    if not failed or idx not in failed:
+        return True
+    _pf = _book_resolve_file(idx)
+    if not _pf:
+        failed.discard(idx)
+        if not failed:
+            st.preload_failed = None
+        _flog(f"[bookloader] オンデマンド再試行スキップ pool={idx} "
+              f"(BookFile 未解決 — 失敗リストから除去)")
+        return False
+    try:
+        if _book_file_is_sbk(_pf):
+            _sbk_load_book(_pf)
+        elif _book_file_is_dbybb(_pf) and _book_pool_db_inmemory(idx):
+            _db_load_book(_pf)
+        failed.discard(idx)
+        if not failed:
+            st.preload_failed = None
+        _flog(f"[bookloader] オンデマンド再試行成功 pool={idx} book_file={_pf!r}")
+        return True
+    except Exception as _oe:
+        _flog(f"[bookloader][CRITICAL] オンデマンド再試行失敗 pool={idx} "
+              f"book_file={_pf!r}: {_oe} — 引き続き失敗リスト保持")
+        return False
 
 def _book_begin_game(ctx, turn: str = "") -> None:
     if getattr(ctx, "shitei_active", False):
@@ -8642,11 +8776,16 @@ def _book_maybe_resolve_turn_from_position(ctx, position_cmd: str) -> None:
         return
     if not ctx.cfg.book_auto_turn:
         return
-    n_moves = 0
-    m = re.search(r"\bmoves\b(.*)$", position_cmd)
-    if m:
-        n_moves = len([t for t in m.group(1).split() if t])
-    nt = "+" if (n_moves % 2 == 0) else "-"
+    try:
+        _plies = _count_moves(position_cmd)
+    except Exception as _ce:
+        _flog(f"[bookloader] _count_moves 例外 (旧近似へフォールバック): {_ce!r}")
+        _plies = 0
+        m = re.search(r"\bmoves\b(.*)$", position_cmd)
+        if m:
+            _plies = len([t for t in m.group(1).split() if t])
+    nt = "+" if (_plies % 2 == 0) else "-"
+    n_moves = _plies
     idx = _book_resolve_index(nt, ctx.cfg)
     bf = _book_resolve_file(idx)
     if idx != st.index or bf != st.book_file:
@@ -9030,17 +9169,22 @@ def _book_consult(ctx, position_cmd: str):
     if move:
         return (move, ctx.book_state.trust)
 
-    if (ctx.book_state.turn == "+"
-            and not ctx.book2_state.exhausted
-            and ctx.book_state.consec >= ctx.cfg.book2_fire_consec
-            and (not _eng_alive(ctx.book2))):
-        _book2_fire_async(ctx)
+    if (getattr(ctx.cfg, "book2_enable", True)
+            and _eng_alive(ctx.book2)
+            and ctx.book2_state.active
+            and ctx.book2_state.initialized):
+        move2 = _book_try_move(ctx, position_cmd, eng=ctx.book2,
+                               st=ctx.book2_state, kill_fn=_book2_kill)
+        if move2:
+            return (move2, ctx.book2_state.trust)
 
     return (None, "")
 
 
 def _book2_fire(ctx) -> None:
     if _eng_alive(ctx.book2):
+        return
+    if not getattr(ctx.cfg, "book2_enable", True):
         return
     _idx = ctx.cfg.book2_pool_index
     _bf = _book_resolve_file(_idx)
@@ -9071,6 +9215,8 @@ def _book2_fire(ctx) -> None:
 
 
 def _book2_fire_async(ctx) -> None:
+    if not getattr(ctx.cfg, "book2_enable", True):
+        return
     st = ctx.book2_state
     if st.firing:
         return
@@ -9088,6 +9234,44 @@ def _book2_fire_async(ctx) -> None:
 
     threading.Thread(target=_run, daemon=True, name="book2-async-fire").start()
     _flog("[bookloader2] 非同期 fire 開始 — council を回す裏で第2 Book を起動")
+
+
+def _book2_start_resident(ctx) -> None:
+    if not _book_enabled:
+        return
+    if not getattr(ctx.cfg, "book2_enable", True):
+        _flog("[bookloader2] Book2_Enable=false — 第2 Book 常駐起動スキップ (user configured off)")
+        return
+    _idx = ctx.cfg.book2_pool_index
+    _bf = _book_resolve_file(_idx)
+    if not _bf:
+        _flog(f"[bookloader2] Book2_Pool_Index={_idx} の BookFile 未解決 — 第2 Book 常駐起動スキップ。")
+        return
+    _b2_kind = "sbk" if _book_file_is_sbk(_bf) else "db"
+    _flog(f"[bookloader2] 常駐フォールバック起動 pool={_idx} book_file={_bf!r} kind={_b2_kind}")
+    try:
+        if ctx.book2 is not None:
+            try:
+                ctx.book2.quit()
+            except Exception:
+                pass
+            ctx.book2 = None
+        ctx.book2 = _NullBookEngine()
+        st = ctx.book2_state
+        st.active = True
+        st.consec = 0
+        st.turn = ""
+        _ok = _book_apply_file(ctx, "book2", _idx, _bf, send_isready=False)
+        st.initialized = _ok
+        if not _ok:
+            _flog(f"[bookloader2] 常駐 apply 失敗 pool={_idx} book_file={_bf!r}")
+        else:
+            _flog(f"[bookloader2] 常駐起動成功 pool={_idx} book_file={_bf!r} "
+                  f"label={st.label!r} trust={st.trust!r}")
+    except Exception as e:
+        _flog(f"[bookloader2] 常駐起動例外: {e}")
+        ctx.book2 = None
+        ctx.book2_state.active = False
 
 
 def _book2_probe_seed_if_ready(ctx, position_cmd: str):
@@ -9333,6 +9517,14 @@ def _parse_go_clock_base(go_line, our_side_ply=None, cfg=None):
     elif _clock_is_sente is None and btime_val is not None and wtime_val is not None:
         if btime_val > 0 and wtime_val > 0:
             remaining_ms = min(btime_val, wtime_val)
+
+    if (_clock_is_sente is not None
+            and our_main == 0 and opponent_main is not None and opponent_main > 60000
+            and (byo_val is None or byo_val == 0)
+            and (_u("binc") or 0) == 0 and (_u("winc") or 0) == 0):
+        _flog(f"[SOFT-GUARD/TURN] 自側時計=0 相手={opponent_main}ms byoyomi/inc なし — "
+              f"手番誤認 (our_side_ply={our_side_ply} sente={_clock_is_sente}) "
+              f"の疑い。go='{go_line[:80]}'")
 
     if byo_val:
         floor_ms = byo_val
@@ -9809,6 +10001,19 @@ def _advance_live_board(pos: str) -> "ShogiBoard":
 
 
 def _set_current_position(ctx, pos: str) -> None:
+    _prev = getattr(ctx, "current_position", None)
+    if _prev and pos and _prev != pos:
+        try:
+            _prev_n = _count_moves(_prev)
+            _new_n = _count_moves(pos)
+            if _prev_n > 0 and _new_n < _prev_n and pos.strip() != "position startpos":
+                _dlog(f"[SOFT-GUARD/POS] plies decreased: {_prev_n} → {_new_n} "
+                      f"(pos changed — take-back / new game?)")
+                if _prev_n - _new_n >= 3:
+                    _flog(f"[SOFT-GUARD/POS] large ply regression {_prev_n} → {_new_n}"
+                          f" — 前対局残留の疑い")
+        except Exception:
+            pass
     ctx.current_position = pos
     if not pos:
         return
@@ -10899,6 +11104,7 @@ def _prefetch_flush(dl_1, label="dl_1", eff_s=None):
 
     try:
         _pre_drained = 0
+        _stale_bestmove_absorbed = 0
         while True:
             try:
                 _pln = dl_1._q.get(block=False)
@@ -10909,7 +11115,13 @@ def _prefetch_flush(dl_1, label="dl_1", eff_s=None):
                 _dlog("[PRE-FLUSH] %s: sentinel during pre-drain (%d lines)"
                       % (label, _pre_drained))
                 return _pre_drained
+            if isinstance(_pln, str) and _pln.startswith("bestmove"):
+                _stale_bestmove_absorbed += 1
             _pre_drained += 1
+        if _stale_bestmove_absorbed > 0:
+            _dlog("[PRE-FLUSH/GUARD] %s: absorbed %d stale bestmove line(s) "
+                  "before search (前搜索残骸)"
+                  % (label, _stale_bestmove_absorbed))
 
         dl_1.send("stop")
         dl_1.send("isready")
@@ -11830,7 +12042,7 @@ def relay_until_bestmove(eng, timeout=120, intercept_bestmove=False,
                     _rem_after_main_s = (
                         remaining_ms - _elapsed_main_ms
                     ) / 1000.0 - _move_overhead_s
-                    _stop_window = _clamp(_rem_after_main_s, 0.3, 5.0)
+                    _stop_window = _clamp(_rem_after_main_s * 0.35, 0.3, 5.0)
                     if _stop_window < 5.0:
                         _flog(
                             f"relay_until_bestmove: stop window scaled by remaining: "
@@ -11841,7 +12053,7 @@ def relay_until_bestmove(eng, timeout=120, intercept_bestmove=False,
                         and floor_ms is not None and floor_ms > 0):
                     _elapsed_main_ms = (time.perf_counter() - _t_start) * 1000.0
                     _rem_after_main_s = (floor_ms - _elapsed_main_ms) / 1000.0
-                    _stop_window = _clamp(_rem_after_main_s, 0.3, 5.0)
+                    _stop_window = _clamp(_rem_after_main_s * 0.35, 0.3, 5.0)
                     if _stop_window < 5.0:
                         _flog(
                             f"relay_until_bestmove: stop window scaled by inc (remaining=0): "
@@ -11897,12 +12109,39 @@ def relay_until_bestmove(eng, timeout=120, intercept_bestmove=False,
                                     pass
                         _flog(f"relay_until_bestmove: stop bestmove={parts[1] if len(parts)>=2 else '?'}")
                         eng._empty_relay_streak = 0
+                        eng._idle_preserve_streak = 0
                         break
                 else:
                     pass
                 if nnue_info["bestmove"]:
                     break
                 if not kill_on_empty and eng._alive:
+                    _idle_preserve_streak = getattr(eng, "_idle_preserve_streak", 0) + 1
+                    eng._idle_preserve_streak = _idle_preserve_streak
+                    _tight_rem = (remaining_ms is not None
+                                  and remaining_ms > 0
+                                  and remaining_ms / 1000.0 - _move_overhead_s < 0.5)
+                    if _tight_rem or _idle_preserve_streak >= 2:
+                        _flog(f"relay_until_bestmove: no bestmove after stop — "
+                              f"{eng.name} SP idle 温存を打ち切り "
+                              f"(tight_rem={_tight_rem} "
+                              f"idle_streak={_idle_preserve_streak}) — "
+                              f"kill して EMERGENCY 経路へ短絡")
+                        try:
+                            _terminate_proc_full(
+                                eng.proc, job=getattr(eng, "_job", None),
+                                via_shell=getattr(eng, "_via_shell", False),
+                                bat_path=getattr(eng, "_bat_path", None),
+                                wsl_tag=getattr(eng, "_wsl_tag", None),
+                                name=eng.name)
+                            eng.proc.wait(timeout=1)
+                        except Exception as _sk_e:
+                            _flog(f"relay_until_bestmove: SP-idle kill failed "
+                                  f"(non-fatal): {_sk_e}")
+                        eng._alive = False
+                        eng._idle_preserve_streak = 0
+                        nnue_info["score_stale"] = True
+                        break
                     _flog(f"relay_until_bestmove: no bestmove after stop — "
                           f"{eng.name} は生存。kill せず空で返す "
                           f"(SP ponderhit idle とみなし呼び出し側で再探索)")
@@ -11971,7 +12210,11 @@ def relay_until_bestmove(eng, timeout=120, intercept_bestmove=False,
                 )
             )
             _last_hb = _now
-        _rl_timeout = min(0.25 if _idle_suspect else 5.0, _remaining)
+        _rl_upper = 5.0
+        if remaining_ms is not None and remaining_ms > 0:
+            _rl_upper = min(_rl_upper,
+                            max(0.2, remaining_ms / 1000.0 - _move_overhead_s))
+        _rl_timeout = min(0.25 if _idle_suspect else _rl_upper, _remaining)
         out = eng.readline(timeout=_rl_timeout)
         if out is None:
             _flog(f"relay_until_bestmove: {eng.name} readline=None (engine died)" + _ctx())
@@ -12489,13 +12732,13 @@ def _write_game_stats(game_log, game_meta, cfg=None):
                 "Council_Score_Discount_Scale":    cfg.council_score_discount_scale,
                 "Council_Score_Discount_Min":      cfg.council_score_discount_min,
                 "Council_Score_Discount_Threshold": cfg.council_score_discount_threshold,
-                "Light_Council_Max_Eff_S":         _cfloat(_cfg, "Light_Council_Max_Eff_S", 3.2674),
+                "Light_Council_Max_Eff_S":         _cfloat(_cfg, "Light_Council_Max_Eff_S", 2.8),
                 "DL_Gap_Lift_Score_Min":           _cint(_cfg, "DL_Gap_Lift_Score_Min", 1452),
                 "DL_Gap_Lift_Spread_Max":          _cint(_cfg, "DL_Gap_Lift_Spread_Max", 53),
                 "GP_Surge_Threshold":              _cfloat(_cfg, "GP_Surge_Threshold", 0.0641),
-                "GP_Surge_Eff_S_Boost":            _cfloat(_cfg, "GP_Surge_Eff_S_Boost", 1.3129),
+                "GP_Surge_Eff_S_Boost":            _cfloat(_cfg, "GP_Surge_Eff_S_Boost", 1.25),
                 "GP_Surge_DL_Weight_Boost":        _cfloat(_cfg, "GP_Surge_DL_Weight_Boost", 1.0574),
-                "GP_Surge_DL2_Timeout_Boost":      _cfloat(_cfg, "GP_Surge_DL2_Timeout_Boost", 1.1744),
+                "GP_Surge_DL2_Timeout_Boost":      _cfloat(_cfg, "GP_Surge_DL2_Timeout_Boost", 1.12),
                 "dlp": game_meta.get("dlp_diff", {}),
         }
 
@@ -13133,6 +13376,20 @@ def _safe_bestmove(final_move, ponder_move=None, label="", nnue_info=None):
     _BM_SENT_GEN = _GO_RECV_GEN
     _STOP_REARM = False
 
+    if ponder_move:
+        _pm = ponder_move.strip() if isinstance(ponder_move, str) else ""
+        if not _pm:
+            ponder_move = None
+        elif _pm in ("resign", "win"):
+            _dlog(f"[SOFT-GUARD/PONDER] dropped invalid ponder={_pm!r} "
+                  f"(bestmove={final_move!r} label={label!r})")
+            ponder_move = None
+        elif _pm == final_move:
+            _dlog(f"[SOFT-GUARD/PONDER] dropped ponder identical to bestmove "
+                  f"({_pm!r} label={label!r})")
+            ponder_move = None
+        else:
+            ponder_move = _pm
     bm_line = f"bestmove {final_move}"
     if ponder_move:
         bm_line += f" ponder {ponder_move}"
@@ -14472,6 +14729,24 @@ class _CouncilBoostResult:
     disagree_emergency_boosted: bool = False
 
 
+_BOOST_SHORT_TIME_HARD_MS       = 8000
+_BOOST_SHORT_TIME_SOFT_MS       = 30000
+_BOOST_MIN_ORIGINAL_EFF_S       = 2.0
+_BOOST_REMAINING_SAFETY_RATIO   = 0.55
+_BOOST_MAX_FACTOR_TIGHT         = 2.0
+
+
+def _boost_short_time_scale(remaining_eff_ms):
+    if remaining_eff_ms is None:
+        return 1.0
+    if remaining_eff_ms <= _BOOST_SHORT_TIME_HARD_MS:
+        return 0.0
+    if remaining_eff_ms >= _BOOST_SHORT_TIME_SOFT_MS:
+        return 1.0
+    span = _BOOST_SHORT_TIME_SOFT_MS - _BOOST_SHORT_TIME_HARD_MS
+    return (remaining_eff_ms - _BOOST_SHORT_TIME_HARD_MS) / span
+
+
 def _council_apply_boost(
     dis: "_CouncilDisagreement",
     eff_s: float,
@@ -14479,10 +14754,31 @@ def _council_apply_boost(
     game_phase_value: float,
     cfg=None,
     regime_label: str = _REGIME_ALERT,
+    remaining_ms=None,
 ) -> "_CouncilBoostResult":
     _original_eff_s = eff_s
-    _EFF_S_BOOST_MAX_FACTOR = 2.5
+    _EFF_S_BOOST_MAX_FACTOR = _BOOST_MAX_FACTOR_TIGHT
     _SUPER_CAP = 3.5
+
+    _remaining_eff_ms = None
+    if remaining_ms is not None and remaining_ms > 0:
+        _remaining_eff_ms = max(0, remaining_ms - _move_overhead_ms)
+    _short_time_scale = _boost_short_time_scale(_remaining_eff_ms)
+    _low_original_scale = (
+        1.0 if _original_eff_s >= _BOOST_MIN_ORIGINAL_EFF_S
+        else max(0.0, _original_eff_s / _BOOST_MIN_ORIGINAL_EFF_S)
+    )
+    _guard_scale = _short_time_scale * _low_original_scale
+    if _guard_scale < 1.0:
+        _dlog(f"[TIMEOUT-GUARD] short_time_scale={_short_time_scale:.3f} "
+              f"low_orig_scale={_low_original_scale:.3f} "
+              f"remaining_eff_ms={_remaining_eff_ms} original_eff_s={_original_eff_s:.2f}s "
+              f"→ non-emergency boosts scaled")
+
+    def _apply_guard(raw_boost):
+        if raw_boost <= 1.0:
+            return raw_boost
+        return 1.0 + (raw_boost - 1.0) * _guard_scale
 
     _b_score1       = cfg.disagree_eff_s_boost_score1
     _b_score2       = cfg.disagree_eff_s_boost_score2
@@ -14525,14 +14821,14 @@ def _council_apply_boost(
     if _disagree_emergency_boosted:
         pass
     elif dis.disagreement_score >= 2 and _gap_ok:
-        _boost = _b_score2
+        _boost = _apply_guard(_b_score2)
         if _boost > 1.0:
             eff_s  *= _boost
             _disagree_eff_s_boosted = True
             _dlog(f"[DISAGREE-C1①] score=2 gap={dis.score_gap_dl_nnue}cp "
                   f"boost×{_boost:.3f} → eff_s={eff_s:.2f}s")
     elif dis.disagreement_score >= 1 and _gap_ok:
-        _boost = _b_score1
+        _boost = _apply_guard(_b_score1)
         if _boost > 1.0:
             eff_s  *= _boost
             _disagree_eff_s_boosted = True
@@ -14554,6 +14850,7 @@ def _council_apply_boost(
                            + (_stab_game_phase_max - _stab_game_phase_min)
                            * game_phase_value)
         _effective_boost = 1.0 + (_stab_boost - 1.0) * _stab_game_phase_factor
+        _effective_boost = _apply_guard(_effective_boost)
         if _effective_boost > 1.0:
             eff_s  *= _effective_boost
             _stability_eff_s_boosted = True
@@ -14567,16 +14864,18 @@ def _council_apply_boost(
     if (dis.game_phase_delta is not None
             and dis.game_phase_delta >= _surge_thresh
             and _surge_boost > 1.0):
-        eff_s  *= _surge_boost
-        _game_phase_surge_boosted = True
-        _dlog(f"[GP-SURGE③] delta={dis.game_phase_delta:.4f} "
-              f"boost×{_surge_boost:.3f} → eff_s={eff_s:.2f}s")
+        _guarded_surge = _apply_guard(_surge_boost)
+        if _guarded_surge > 1.0:
+            eff_s  *= _guarded_surge
+            _game_phase_surge_boosted = True
+            _dlog(f"[GP-SURGE③] delta={dis.game_phase_delta:.4f} "
+                  f"boost×{_guarded_surge:.3f} → eff_s={eff_s:.2f}s")
 
     _regime_eff_s_scale = 1.0
     if regime_label == _REGIME_CRUISE:
         _regime_eff_s_scale = _REGIME_CRUISE_EFF_S_SCALE
     elif regime_label == _REGIME_CRISIS:
-        _regime_eff_s_scale = _REGIME_CRISIS_EFF_S_BOOST
+        _regime_eff_s_scale = _apply_guard(_REGIME_CRISIS_EFF_S_BOOST)
     if _disagree_emergency_boosted:
         _regime_eff_s_scale = max(1.0, _regime_eff_s_scale)
     if _regime_eff_s_scale != 1.0:
@@ -14599,6 +14898,15 @@ def _council_apply_boost(
             _dlog(f"[BOOST-CAP] eff_s={eff_s:.2f}s → capped at {_eff_s_cap:.2f}s "
                   f"(original={_original_eff_s:.2f}s ×{_EFF_S_BOOST_MAX_FACTOR})")
             eff_s = _eff_s_cap
+
+    if _remaining_eff_ms is not None and _remaining_eff_ms > 0:
+        _rem_cap_s = (_remaining_eff_ms * _BOOST_REMAINING_SAFETY_RATIO) / 1000.0
+        _rem_cap_s = max(_rem_cap_s, _original_eff_s)
+        if eff_s > _rem_cap_s:
+            _dlog(f"[BOOST-REM-CAP] eff_s={eff_s:.2f}s → {_rem_cap_s:.2f}s "
+                  f"(remaining_eff_ms={_remaining_eff_ms} "
+                  f"×{_BOOST_REMAINING_SAFETY_RATIO})")
+            eff_s = _rem_cap_s
 
     eff_ms = eff_s * 1000.0
     return _CouncilBoostResult(
@@ -15833,6 +16141,7 @@ def _council_lookup_prefetch_cache(ctx):
 
 
 def _dyn_apply_nnue_threads(ctx, eng, path):
+    return
     if not _dyn_threads_enable or eng is None:
         return
     if _RUN_MODE is RunMode.DLP_CAL:
@@ -16844,9 +17153,12 @@ def _run_council_search(ctx, line, move_count, dl_timeout,
         nnue_score_now     = _nnue_score_now,
         game_phase_delta           = _game_phase_delta_eff,
     )
+    _boost_clock = ctx.ps.go_clock or ctx.ps.ponder_clock
+    _boost_remaining_ms = _boost_clock.remaining_ms if _boost_clock is not None else None
     _boost_res = _council_apply_boost(
         _boost_dis, _eff_s, _eff_ms, _game_phase_value, cfg=ctx.cfg,
         regime_label=ctx.game_progress.regime_label,
+        remaining_ms=_boost_remaining_ms,
     )
     _arb_pre_boost_eff_s = _eff_s
     _eff_s  = _boost_res.eff_s
@@ -16855,6 +17167,13 @@ def _run_council_search(ctx, line, move_count, dl_timeout,
     _stability_eff_s_boosted = _boost_res.stability_eff_s_boosted
     _game_phase_surge_boosted        = _boost_res.game_phase_surge_boosted
     _disagree_emergency_boosted = _boost_res.disagree_emergency_boosted
+
+    if getattr(ctx.cfg, "nameerr_guard_debug", False):
+        _leaked = [n for n in ("_original_eff_s", "_boost_orig_eff_s")
+                   if n in dir()]
+        if _leaked:
+            _dlog(f"[NAMEERR-GUARD] スコープに boost 内部変数が漏出: {_leaked} — "
+                  "_council_apply_boost の戻り値のみで続行 (本手は無影響、要リファクタ調査)")
 
     if _disagree_eff_s_boosted or _stability_eff_s_boosted or _game_phase_surge_boosted:
         ctx.game_progress.disagree_boosted_eff_s = _eff_s
@@ -18459,6 +18778,7 @@ class _ZfServer:
         try:
             if self._proc is not None:
                 self._proc.kill()
+                self._proc.wait(timeout=3)
         except Exception:
             pass
         self._proc = None
@@ -21307,9 +21627,9 @@ def _handle_usinewgame(ctx, line):
     _live_stats_new_game(ctx, getattr(ctx, "game_meta", None))
     if _book_enabled:
         _book_begin_game(ctx, turn=ctx.book_state.turn_hint)
-    if getattr(ctx, "book2", None) is not None:
-        _book2_kill(ctx, reason="usinewgame — 新局のため第2 Book を一旦終了")
     ctx.book2_state.reset()
+    if _book_enabled:
+        _book2_start_resident(ctx)
     for _dl_eng in (ctx.dl_1, ctx.dl_2, ctx.dl_3):
         if _dl_eng is not None:
             _dl_eng._last_sp_sent = None
@@ -22472,6 +22792,15 @@ def _ponderhit_restart_nnue1_and_movetime(ctx, position_cmd, move_count, eff_s,
                                     go_clock=None):
     _phit_trace("restart", who=restart_caller)
     _rec_rem_ms = _ph_recovery_rem_ms(clock_rem_ms)
+    if _rec_rem_ms is not None and _rec_rem_ms < 3000.0 + _move_overhead_ms:
+        _flog(f"{restart_caller}: [RESTART-GATE] recovery 残 {_rec_rem_ms:.0f}ms "
+              f"< 3000ms+overhead — 同期 restart 断念、async revive に委譲")
+        try:
+            _revive_dead_nnue_async(ctx, eff_s)
+        except Exception as _rg_e:
+            _flog(f"{restart_caller}: [RESTART-GATE] async revive failed "
+                  f"(non-fatal): {_rg_e}")
+        return None
     _rec_readyok_to = (_clamp(_rec_rem_ms / 1000.0 * 0.5, 0.5, 30.0)
                        if _rec_rem_ms is not None else None)
     _restart_nnue_1(ctx, restart_caller, readyok_timeout=_rec_readyok_to)
@@ -23234,7 +23563,7 @@ def _ponderhit_handle_cache_hit(ctx, position_cmd, move_count, ponderhit_pv_hold
             go_clock=go_clock)
         if _restart_result is None:
             _flog("[PH-CACHE-HIT] nnue_1 restart failed — 空で返し _ponderhit_finalize 救済へ")
-            return "", None, None, {}
+            return "", None, None, ({"_live_dl1_policy": dl1_cache[0]} if dl1_cache and dl1_cache[0] else {})
         _pm_r, _ni_r = _restart_result
         _nnue_bm_r = _ni_r.get("bestmove", "") if _ni_r else ""
         _nnue_pd_r = _ni_r.get("ponder") if _ni_r else None
@@ -23315,6 +23644,21 @@ def _ponderhit_handle_cache_hit(ctx, position_cmd, move_count, ponderhit_pv_hold
             "(SP=%s) — stop+drain then position+go re-search"
             % _nnue_1_opts.get("Stochastic_Ponder", "?")
         )
+        _chi_gate_rem_ms = _ph_recovery_rem_ms(_clock_rem_ms)
+        if (_chi_gate_rem_ms is not None
+                and _chi_gate_rem_ms < _move_overhead_ms + 1500):
+            _flog("[PH-CACHE-HIT/TIGHT-SKIP] recovery 残 %.0fms < overhead+1500ms "
+                  "— stop/restart/再探索を放棄し即 finalize 救済へ "
+                  "(nnue_1 は async revive)" % _chi_gate_rem_ms)
+            _phit_trace("tight_skip", rem="%.0f" % _chi_gate_rem_ms)
+            try:
+                if ctx.nnue_1._alive:
+                    ctx.nnue_1.send("stop")
+                else:
+                    _revive_dead_nnue_async(ctx, eff_s)
+            except Exception as _ts_e:
+                _flog(f"[PH-CACHE-HIT/TIGHT-SKIP] non-fatal: {_ts_e}")
+            return "", None, None, ({"_live_dl1_policy": dl1_cache[0]} if dl1_cache and dl1_cache[0] else {})
         if not ctx.nnue_1._alive:
             _flog("[PH-CACHE-HIT] nnue_1 died during ponderhit relay — restarting before re-search")
             _ponderhit_pv = [None]
@@ -23327,7 +23671,7 @@ def _ponderhit_handle_cache_hit(ctx, position_cmd, move_count, ponderhit_pv_hold
                 go_clock=go_clock)
             if _restart_result is None:
                 _flog("[PH-CACHE-HIT] nnue_1 restart failed (recovery) — 空で返し救済へ")
-                return "", None, None, {}
+                return "", None, None, ({"_live_dl1_policy": dl1_cache[0]} if dl1_cache and dl1_cache[0] else {})
             _pm, _ni = _restart_result
         else:
             ctx.nnue_1.send("stop")
@@ -23356,7 +23700,7 @@ def _ponderhit_handle_cache_hit(ctx, position_cmd, move_count, ponderhit_pv_hold
                     go_clock=go_clock)
                 if _restart_result is None:
                     _flog("[PH-CACHE-HIT] nnue_1 restart failed (drain) — 空で返し救済へ")
-                    return "", None, None, {}
+                    return "", None, None, ({"_live_dl1_policy": dl1_cache[0]} if dl1_cache and dl1_cache[0] else {})
                 _pm, _ni = _restart_result
             else:
                 if not _flush_or_mark_dirty(ctx, "PH-CACHE-HIT", eff_s):
@@ -24719,6 +25063,10 @@ def _handle_game(ctx, line):
     _flog("[GAME] 'game' command received — starting CSA connection in background thread")
     _game_args = line.split()[1:]
 
+    global _book_enabled
+    _book_enabled = False
+    _flog("[GAME] 定跡無効化 (_book_enabled=False) — game モードでは定跡を使用しない")
+
     def _run():
         global _game_thread_started
         _game_thread_started = True
@@ -24750,6 +25098,10 @@ def _handle_match(ctx, line):
 
     _flog("[MATCH] 'match' command received — starting Denryusen CSA connection in background thread")
     _match_args = line.split()[1:]
+
+    global _book_enabled
+    _book_enabled = _book_enabled_init
+    _flog(f"[MATCH] 定跡有効化 (_book_enabled={_book_enabled}) — match モードでは定跡を使用する")
 
     def _run():
         global _game_thread_started
@@ -25790,6 +26142,10 @@ def _learn_shutdown():
                 proc.kill()
             except Exception:
                 pass
+        try:
+            proc.wait(timeout=3)
+        except Exception:
+            pass
         _kill_children_nt(proc.pid)
 
 
@@ -28560,8 +28916,8 @@ def _spsa_default_params() -> list:
 
     _p("GP_Handover_Threshold", _scfg.game_phase_handover_threshold, 0.45, 0.95, c=0.04, is_int=False)
     _p("GP_Handover_Per_Sec", _scfg.game_phase_handover_per_sec, -0.01, 0.01, c=0.002, is_int=False)
-    _inc_spend_ratio_clamped = min(0.90, _inc_spend_ratio)
-    _p("Inc_Spend_Ratio", _inc_spend_ratio_clamped, 0.7, 0.90, c=0.03, is_int=False)
+    _inc_spend_ratio_clamped = min(0.80, _inc_spend_ratio)
+    _p("Inc_Spend_Ratio", _inc_spend_ratio_clamped, 0.7, 0.80, c=0.02, is_int=False)
     _p("Fischer_Horizon_Moves", _fischer_horizon_moves, 20, 36, c=1.0, is_int=True)
     _p("Handover_Reverse_Hysteresis", _scfg.handover_reverse_hysteresis, 0.0, 0.15, c=0.01, is_int=False)
     _p("Endgame_DL_Veto_WR_Margin", _scfg.endgame_dl_veto_wr_margin, 0.05, 0.35, c=0.02, is_int=False)
@@ -28636,7 +28992,7 @@ def _spsa_default_params() -> list:
     _p("Endgame_Min_Eff_S",
        _clamp(_scfg.endgame_min_eff_s or 1.5, 0.8, 3.0),
                                                        0.8,  3.0,  c=0.15,  is_int=False)
-    _p("Light_Council_Max_Eff_S",    _cfloat(_cfg, "Light_Council_Max_Eff_S", 3.2674),
+    _p("Light_Council_Max_Eff_S",    _cfloat(_cfg, "Light_Council_Max_Eff_S", 2.8),
                                                                    1.8,  4.5,  c=0.15,  is_int=False)
     _p("Light_Council_DL3_Weight",   _scfg.light_council_dl3_weight,   0.6,  1.5,  c=0.09,  is_int=False)
     _p("DL_Time_Ratio_Eff_S_Coef",   _dl_time_ratio_eff_s_coef, -0.02, 0.02, c=0.002, is_int=False)
@@ -28694,11 +29050,11 @@ def _spsa_default_params() -> list:
 
     _p("GP_Surge_Threshold",          _cfloat(_cfg, "GP_Surge_Threshold", 0.0641),
                                                                     0.02, 0.15, c=0.01, is_int=False)
-    _p("GP_Surge_Eff_S_Boost",        _cfloat(_cfg, "GP_Surge_Eff_S_Boost", 1.3129),
+    _p("GP_Surge_Eff_S_Boost",        _cfloat(_cfg, "GP_Surge_Eff_S_Boost", 1.25),
                                                                     1.0,  1.8,  c=0.05, is_int=False)
     _p("GP_Surge_DL_Weight_Boost",    _cfloat(_cfg, "GP_Surge_DL_Weight_Boost", 1.0574),
                                                                     1.0,  1.6,  c=0.04, is_int=False)
-    _p("GP_Surge_DL2_Timeout_Boost",  _cfloat(_cfg, "GP_Surge_DL2_Timeout_Boost", 1.1744),
+    _p("GP_Surge_DL2_Timeout_Boost",  _cfloat(_cfg, "GP_Surge_DL2_Timeout_Boost", 1.12),
                                                                     1.0,  2.0,  c=0.06, is_int=False)
 
     _p("Council_Score_Discount_Scale", float(_scfg.council_score_discount_scale), 300, 900, c=40)
@@ -29139,13 +29495,31 @@ class _SpsaUsiEngine:
                          ).strip().lower() in ("true", "1")
         _total_cores = _safe_cpu_count()
         _wc = _cint(cfg, "Tuning_Worker_Count", 2, lo=1)
-        _nnue_per = max(1, (_total_cores - 1) // _wc)
+        if _total_cores >= 64:
+            _nnue_per = 60
+        else:
+            _nnue_per = max(1, (_total_cores - 1) // _wc)
+        _halve_hash_override = {}
+        try:
+            _htotal = _SYS_TOTAL_RAM_MB
+            if _htotal >= 128 * 1024 and halve:
+                _hsafety = 6144
+                _hdl_reserve = 12288 + _sys_gpu_count() * 512 * 3
+                _hbasis = max(4096, _htotal - _hsafety - _hdl_reserve)
+                _hworker_cap = min(_HASH_ABS_CAP_MB // 2, 65536)
+                _hper = min(_hworker_cap, _hbasis // max(1, _wc))
+                _halve_hash_override["nnue_1_Hash"] = _hper
+                _halve_hash_override["nnue_2_Hash"] = max(64, _hper // 16)
+        except Exception:
+            pass
         out = {}
         for key, val in cfg.items():
             if not halve:
                 pass
             elif key in _SpsaUsiEngine._HALVE_KEYS:
-                if _budget_on:
+                if key in _halve_hash_override:
+                    val = _halve_hash_override[key]
+                elif _budget_on:
                     val = _CONFIG_DEFAULTS.get(key, val)
                 else:
                     try:
@@ -29164,8 +29538,10 @@ class _SpsaUsiEngine:
                     pass
             elif key in _SpsaUsiEngine._SELFPLAY_DL:
                 val = _SpsaUsiEngine._SELFPLAY_DL[key]
-            elif key in ("nnue_1_Threads", "nnue_2_Threads"):
+            elif key == "nnue_1_Threads":
                 val = str(_nnue_per)
+            elif key == "nnue_2_Threads":
+                val = "1"
             elif key == "Resource_Threads_Spare_Min":
                 val = "1"
             out[key] = val
@@ -29259,6 +29635,10 @@ class _SpsaUsiEngine:
         self._last_ack_gen = None
         self._bm_gen = None
         self._last_rec = None
+        self._info_interval_ema = None
+        self._last_info_t = None
+        self._ph_sent_t = None
+        self._ph_settle_ema = None
         self._last_drained_bm = None
         self._dup_drained_bm = False
         self._send_lock = threading.Lock()
@@ -29271,6 +29651,28 @@ class _SpsaUsiEngine:
                     q.put(_rl_line)
                     if _rl_line.startswith("bestmove") and _self.proc is proc:
                         _self._bm_arrived += 1
+                    if _self.proc is proc and (
+                            _rl_line.startswith("info ")
+                            or _rl_line.startswith("bestmove")):
+                        _now_ema = time.perf_counter()
+                        _ph_t0 = _self._ph_sent_t
+                        if _ph_t0 is not None:
+                            _self._ph_sent_t = None
+                            _settle = _now_ema - _ph_t0
+                            _olds = _self._ph_settle_ema
+                            _self._ph_settle_ema = (
+                                _settle if _olds is None
+                                else 0.3 * _settle + 0.7 * _olds)
+                        _prev_t = _self._last_info_t
+                        _self._last_info_t = _now_ema
+                        if _prev_t is not None:
+                            _gap = _now_ema - _prev_t
+                            _old = _self._info_interval_ema
+                            if _old is None:
+                                _self._info_interval_ema = _gap
+                            else:
+                                _self._info_interval_ema = (
+                                    0.3 * _gap + 0.7 * _old)
             except (KeyboardInterrupt, SystemExit):
                 raise
             except Exception as _rde:
@@ -29698,7 +30100,7 @@ class _SpsaTimeControl:
     __slots__ = ("kind", "main_ms", "inc_ms", "byoyomi_ms", "overhead_ms", "label")
 
     def __init__(self, kind, main_ms, inc_ms=0, byoyomi_ms=0,
-                 overhead_ms=200, label=None):
+                 overhead_ms=400, label=None):
         self.kind        = kind
         self.main_ms     = int(main_ms)
         self.inc_ms      = int(inc_ms)
@@ -29742,7 +30144,7 @@ _SelfplayBudget = namedtuple("_SelfplayBudget",
 def _selfplay_derive_budget(tc, remaining_ms: float) -> _SelfplayBudget:
     inc_grant_ms = tc.inc_ms if tc.kind == "fischer" else 0
     budget_ms = remaining_ms + inc_grant_ms + (tc.byoyomi_ms if tc.kind == "byoyomi" else 0)
-    stop_cushion_ms = max(50.0, float(tc.overhead_ms) + 300.0)
+    stop_cushion_ms = max(50.0, float(tc.overhead_ms) + 400.0)
     main_budget_ms = max(0.0, budget_ms - stop_cushion_ms)
     wait_s = max(0.05, main_budget_ms / 1000.0)
     flag_limit_ms = budget_ms + stop_cushion_ms
@@ -29773,7 +30175,7 @@ def _parse_tc_kv(kv: str) -> dict:
     return fields
 
 
-def _sprt_parse_tc_core(spec, overhead_ms: int = 200) -> "_SpsaTimeControl":
+def _sprt_parse_tc_core(spec, overhead_ms: int = 400) -> "_SpsaTimeControl":
     s = (spec or "").strip()
     if not s:
         return _SpsaTimeControl("byoyomi", 0, byoyomi_ms=2000,
@@ -29797,12 +30199,12 @@ def _sprt_parse_tc_core(spec, overhead_ms: int = 200) -> "_SpsaTimeControl":
 
 
 def _spsa_parse_tc_spec() -> list:
-    _raw_oh = os.environ.get("SPSA_TC_OVERHEAD_MS", "200")
+    _raw_oh = os.environ.get("SPSA_TC_OVERHEAD_MS", "400")
     try:
         overhead = int(_raw_oh)
     except ValueError:
-        _flog(f"[E-27] SPSA_TC_OVERHEAD_MS={_raw_oh!r} は非数値 — 200 にフォールバック")
-        overhead = 200
+        _flog(f"[E-27] SPSA_TC_OVERHEAD_MS={_raw_oh!r} は非数値 — 400 にフォールバック")
+        overhead = 400
     raw = os.environ.get("SPSA_TC", "").strip()
     if not raw:
         return _spsa_default_tcs(overhead)
@@ -30057,6 +30459,7 @@ def _selfplay_game(eng_sente: "_SpsaUsiEngine",
                           % (thinker._go_sent, thinker._bm_arrived))
                 if not bestmove and not _ph_skip_send:
                     thinker.send(("ponderhit " + _ponderhit_clock) if _ponderhit_clock else "ponderhit")
+                    thinker._ph_sent_t = time.perf_counter()
                 _ponder_hits += 1
             else:
                 _non_thinker = eng_gote if is_sente else eng_sente
@@ -30453,6 +30856,9 @@ def _selfplay_game(eng_sente: "_SpsaUsiEngine",
         _hit_isready_probed = False
         _wd_reissue_prev_gen = None
         _hit_probe_s = _clamp(0.25 * _main_budget_ms / 1000.0, 1.0, 20.0)
+        _ema_val = getattr(thinker, "_ph_settle_ema", None)
+        if _ema_val is not None:
+            _hit_probe_s = _clamp(_ema_val * 1.5, 4.0, 20.0)
         _hit_probe_s = min(_hit_probe_s,
                            max(1.0, 0.10 * our_remaining / 1000.0))
         if _is_hit_path and _sp_pre_drained:
@@ -30674,6 +31080,16 @@ def _selfplay_game(eng_sente: "_SpsaUsiEngine",
                         _intervention_ms += (_now_wd - _hwb_credit) * 1000.0
                         if _wd_reissue_prev_gen is None:
                             _wd_reissue_prev_gen = thinker._go_sent
+                        try:
+                            thinker.send("stop")
+                        except Exception:
+                            pass
+                        try:
+                            thinker.flush_until_ready(timeout=5.0)
+                        except Exception as _fl_e:
+                            _flog("[SPSA-W][%s] hit-watchdog stage2: "
+                                  "flush_until_ready failed: %s"
+                                  % (side, _fl_e))
                         _rs2_active_ms = max(
                             0.0, (_now_wd - _t_think0_orig) * 1000.0
                             - _intervention_ms)
@@ -30978,7 +31394,7 @@ def _selfplay_game(eng_sente: "_SpsaUsiEngine",
                         thinker._bm_arrived = thinker._go_sent
                     break
                 if (not _is_hit_path
-                        and _stale_miss_reissue_count > 0
+                        and _stale_miss_reissue_count > 1
                         and thinker._bm_gen is not None
                         and thinker._bm_gen < thinker._go_sent
                         and move_no >= 2
@@ -31287,19 +31703,19 @@ def _selfplay_game(eng_sente: "_SpsaUsiEngine",
         if (not _fast_first and move_no >= _FAST_BM_MIN_MOVE
                 and elapsed_ms < _FAST_BM_THRESHOLD_MS):
             _fast_bm_streak += 1
-            if (_fast_bm_streak >= _FAST_BM_STREAK_LIMIT
-                    and _fast_bm_marker_info is None):
-                _flog("[SPSA-W][%s][FAST-BM] WARN: %d consecutive moves in <%dms "
-                      "(move %d, elapsed=%dms) — sub-engine may be dead "
-                      "(marker only, game continues)"
+            if _fast_bm_streak >= _FAST_BM_STREAK_LIMIT and _fast_bm_marker_info is None:
+                _flog("[SPSA-W][%s][FAST-BM] %d consecutive moves in <%dms "
+                      "(move %d, elapsed=%dms) — sub-engine possibly dead, "
+                      "marking only (game continues)"
                       % (side, _fast_bm_streak, _FAST_BM_THRESHOLD_MS,
                          move_no + 1, elapsed_ms))
                 _fast_bm_marker_info = {
                     "streak": _fast_bm_streak,
-                    "elapsed_ms": elapsed_ms,
+                    "threshold_ms": _FAST_BM_THRESHOLD_MS,
                     "move_no": move_no + 1,
+                    "elapsed_ms": elapsed_ms,
+                    "side": side,
                 }
-                _fast_bm_streak = 0
         elif elapsed_ms >= _FAST_BM_THRESHOLD_MS:
             _fast_bm_streak = 0
         if bestmove == "resign":
@@ -35247,6 +35663,15 @@ class _CsaGame:
         _GO_EMITTED = False
         try:
             _dispatch(self.ctx, _go_line)
+        except NameError as _dg_ne:
+            _flog(f"[CSA-DISPATCH-GUARD/NAMEERR] _dispatch_go raised NameError: {_dg_ne}\n"
+                  + _safe_format_exc().strip()
+                  + "\n[CSA-DISPATCH-GUARD/NAMEERR] 構造的バグの兆候 — "
+                    "orchestrator board desync の連鎖に発展する可能性あり (要 grep 追跡)")
+            try:
+                _dispatch_guard_fallback(self.ctx, _go_line)
+            except Exception as _dg_fe:
+                _flog(f"[CSA-DISPATCH-GUARD/NAMEERR] fallback raised (ignored): {_dg_fe!r}")
         except Exception as _dg_e:
             _flog(f"[CSA-DISPATCH-GUARD] _dispatch_go raised: {_dg_e}\n"
                   + _safe_format_exc().strip())
@@ -39839,6 +40264,7 @@ class _GpfitPool:
             p.join(timeout=5)
             if p.is_alive():
                 p.terminate()
+                p.join(timeout=3)
         for pc in self._conns:
             try:
                 pc.close()
